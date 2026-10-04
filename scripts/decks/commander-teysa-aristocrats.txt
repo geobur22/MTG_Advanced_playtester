@@ -1,0 +1,77 @@
+12 Plains
+12 Swamp
+1 Godless Shrine
+1 Command Tower
+1 Caves of Koilos
+1 Vault of the Archangel
+1 Fabled Passage
+1 Evolving Wilds
+1 Terramorphic Expanse
+1 Path of Ancestry
+1 Sol Ring
+1 Arcane Signet
+1 Orzhov Signet
+1 Talisman of Hierarchy
+1 Mind Stone
+1 Blood Artist
+1 Zulaport Cutthroat
+1 Cruel Celebrant
+1 Viscera Seer
+1 Carrion Feeder
+1 Yahenni, Undying Partisan
+1 Bastion of Remembrance
+1 Elas il-Kor, Sadistic Pilgrim
+1 Vindictive Vampire
+1 Falkenrath Noble
+1 Syr Konrad, the Grim
+1 Midnight Reaper
+1 Woe Strider
+1 Doomed Dissenter
+1 Priest of Forgotten Gods
+1 Solemn Simulacrum
+1 Reassembling Skeleton
+1 Grave Pact
+1 Dictate of Erebos
+1 Village Rites
+1 Bone Splinters
+1 Diabolic Tutor
+1 Fatal Push
+1 Ayara, First of Locthwain
+1 Butcher of Malakir
+1 Cliffhaven Vampire
+1 Vindicate
+1 Utter End
+1 Anguished Unmaking
+1 Blood Bairn
+1 Corpse Knight
+1 Marionette Master
+1 Revel in Riches
+1 Ministrant of Obligation
+1 Orzhov Advokist
+1 Twilight Prophet
+1 Athreos, God of Passage
+1 Sheoldred, the Apocalypse
+1 Toxic Deluge
+1 Damnation
+1 Vona, Butcher of Magan
+1 Sanguine Bond
+1 Exquisite Blood
+1 Debt to the Deathless
+1 Aetherflux Reservoir
+1 Bloodghast
+1 Vito, Thorn of the Dusk Rose
+1 Costly Plunder
+1 Bake into a Pie
+1 Bishop of Wings
+1 Karlov of the Ghost Council
+1 Divine Visitation
+1 High Market
+1 Phyrexian Tower
+1 Ashnod's Altar
+1 Attrition
+1 Grave Titan
+1 Massacre Wurm
+1 Righteous Cause
+1 Suture Priest
+1 Well of Lost Dreams
+1 Skullclamp

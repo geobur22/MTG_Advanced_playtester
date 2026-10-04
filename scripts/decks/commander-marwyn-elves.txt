@@ -1,0 +1,68 @@
+32 Forest
+1 Command Tower
+1 Nykthos, Shrine to Nyx
+1 Boseiju, Who Endures
+1 Path of Ancestry
+1 Sol Ring
+1 Arcane Signet
+1 Mind Stone
+1 Priest of Titania
+1 Elvish Archdruid
+1 Llanowar Elves
+1 Elvish Mystic
+1 Beast Whisperer
+1 Elvish Visionary
+1 Wirewood Symbiote
+1 Timberwatch Elf
+1 Elvish Promenade
+1 Craterhoof Behemoth
+1 Elven Bow
+1 Genesis Wave
+1 Rishkar, Peema Renegade
+1 Wren's Run Vanquisher
+1 Joraga Warcaller
+1 Immaculate Magistrate
+1 Nettle Sentinel
+1 Heritage Druid
+1 Fyndhorn Elves
+1 Boreal Druid
+1 Wood Elves
+1 Sylvan Ranger
+1 Skyshroud Poacher
+1 Elvish Guidance
+1 Wirewood Channeler
+1 Elvish Vanguard
+1 Elvish Champion
+1 Lys Alana Huntmaster
+1 Elvish Branchbender
+1 Elvish Farmer
+1 Devoted Druid
+1 Rofellos, Llanowar Emissary
+1 Multani, Yavimaya's Avatar
+1 Overrun
+1 Beastmaster Ascension
+1 Return of the Wildspeaker
+1 Elemental Bond
+1 Vanquisher's Banner
+1 Nature's Lore
+1 Rampant Growth
+1 Cultivate
+1 Kodama's Reach
+1 Sakura-Tribe Elder
+1 Yavimaya Elder
+1 Eternal Witness
+1 Regrowth
+1 Beast Within
+1 Reclamation Sage
+1 Acidic Slime
+1 Nissa's Pilgrimage
+1 Migration Path
+1 Circuitous Route
+1 Colossal Majesty
+1 Soul's Majesty
+1 Hunter's Insight
+1 Shamanic Revelation
+1 Harmonize
+1 Explosive Vegetation
+1 Ranger's Path
+1 Tempt with Discovery

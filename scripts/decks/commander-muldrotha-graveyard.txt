@@ -1,0 +1,75 @@
+9 Forest
+9 Island
+9 Swamp
+1 Watery Grave
+1 Overgrown Tomb
+1 Breeding Pool
+1 Command Tower
+1 Woodland Cemetery
+1 Drowned Catacomb
+1 Fabled Passage
+1 Evolving Wilds
+1 Terramorphic Expanse
+1 Path of Ancestry
+1 Eternal Witness
+1 Reclamation Sage
+1 Acidic Slime
+1 Mulldrifter
+1 Nightveil Specter
+1 Sakura-Tribe Elder
+1 Solemn Simulacrum
+1 Sol Ring
+1 Arcane Signet
+1 Cultivate
+1 Rampant Growth
+1 Sign in Blood
+1 Night's Whisper
+1 Beast Within
+1 Putrefy
+1 Doom Blade
+1 Tasigur, the Golden Fang
+1 Meren of Clan Nel Toth
+1 Golgari Grave-Troll
+1 Life from the Loam
+1 Grim Haruspex
+1 Deathrite Shaman
+1 Splendid Reclamation
+1 Ramunap Excavator
+1 Perpetual Timepiece
+1 Palace Siege
+1 Underrealm Lich
+1 Yavimaya Elder
+1 Grim Flayer
+1 Vessel of Nascency
+1 Satyr Wayfinder
+1 Stitcher's Supplier
+1 Prized Amalgam
+1 Prophetic Prism
+1 Golgari Signet
+1 Dimir Signet
+1 Simic Signet
+1 Command Beacon
+1 Coffin Queen
+1 Sidisi, Undead Vizier
+1 Tatyova, Benthic Druid
+1 Uro, Titan of Nature's Wrath
+1 Beast Whisperer
+1 Mulch
+1 Grisly Salvage
+1 Traverse the Ulvenwald
+1 Vampiric Tutor
+1 Demonic Tutor
+1 Toxic Deluge
+1 Cyclonic Rift
+1 Bane of Progress
+1 Sultai Charm
+1 Baleful Strix
+1 Sakashima's Student
+1 Regrowth
+1 Nature's Spiral
+1 Elixir of Immortality
+1 Fauna Shaman
+1 World Shaper
+1 Zulaport Cutthroat
+1 Blood Artist
+1 Grave Titan

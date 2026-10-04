@@ -1,0 +1,74 @@
+6 Plains
+6 Island
+6 Swamp
+6 Mountain
+6 Forest
+1 Command Tower
+1 City of Brass
+1 Mana Confluence
+1 Reflecting Pool
+1 Exotic Orchard
+1 Path of Ancestry
+1 Sol Ring
+1 Arcane Signet
+1 Chromatic Lantern
+1 Coalition Relic
+1 Fellwar Stone
+1 Scion of the Ur-Dragon
+1 Dragonlord Atarka
+1 Dragonlord Dromoka
+1 Dragonlord Kolaghan
+1 Dragonlord Ojutai
+1 Dragonlord Silumgar
+1 Utvara Hellkite
+1 Bladewing the Risen
+1 Karrthus, Tyrant of Jund
+1 Scourge of Valkas
+1 Dragon Broodmother
+1 Dragon Tempest
+1 Terror of the Peaks
+1 Verix Bladewing
+1 Hellkite Tyrant
+1 Skithiryx, the Blight Dragon
+1 Balefire Dragon
+1 Dromoka, the Eternal
+1 Kilnmouth Dragon
+1 Thunderbreak Regent
+1 Glorybringer
+1 Moonveil Dragon
+1 Savage Ventmaw
+1 Herald's Horn
+1 Miirym, Sentinel Wyrm
+1 Beacon of Destruction
+1 Cyclonic Rift
+1 Swords to Plowshares
+1 Path to Exile
+1 Chaos Warp
+1 Vindicate
+1 Cultivate
+1 Farseek
+1 Rampant Growth
+1 Sign in Blood
+1 Night's Whisper
+1 Dragonstorm
+1 Dragon's Hoard
+1 Crux of Fate
+1 Dragon Mage
+1 Dragon Egg
+1 Bathe in Dragonfire
+1 Frost Breath
+1 Belbe's Portal
+1 Etali, Primal Storm
+1 Scourge of the Throne
+1 Furnace Whelp
+1 Chromium, the Mutable
+1 Arcades, the Strategist
+1 Palladia-Mors, the Ruiner
+1 Rimescale Dragon
+1 Shivan Dragon
+1 Old Gnawbone
+1 Malfegor
+1 Steel Hellkite
+1 Dragonlord's Servant
+1 Fist of Suns
+1 Urza's Incubator

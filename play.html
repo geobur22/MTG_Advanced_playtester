@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Proxy Table — game</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <div id="game-screen" class="screen">
+    <div id="opponent-bar" class="player-bar"></div>
+    <div id="opponent-command-zone" class="command-zone" hidden></div>
+
+    <div id="board">
+      <div id="opponent-battlefield" class="battlefield"></div>
+      <div id="stack-panel">
+        <div class="stack-title">Stack</div>
+        <div id="stack-list"></div>
+      </div>
+      <div id="player-battlefield" class="battlefield"></div>
+    </div>
+
+    <div id="action-bar">
+      <div id="step-indicator"></div>
+      <div id="action-buttons"></div>
+      <button id="undo-button" class="secondary-button small-button" title="Undo your last action" disabled>Undo</button>
+      <div id="watch-speed-row" hidden>
+        <label for="watch-speed-slider">Speed</label>
+        <input type="range" id="watch-speed-slider" min="0" max="1500" step="10" />
+        <span id="watch-speed-label"></span>
+      </div>
+    </div>
+
+    <div id="player-hand"></div>
+    <div id="player-command-zone" class="command-zone" hidden></div>
+    <div id="player-bar" class="player-bar"></div>
+
+    <button id="log-toggle" title="Game log">Log<span id="log-error-badge" hidden></span></button>
+    <div id="log-panel" hidden><div id="log-lines"></div></div>
+    <div id="error-toast-container"></div>
+
+    <div id="card-detail-panel" hidden>
+      <div id="card-detail-header">
+        <span id="card-detail-title"></span>
+        <button id="card-detail-close" class="secondary-button small-button">Close</button>
+      </div>
+      <div id="card-detail-body">
+        <div id="card-detail-visual"></div>
+        <div id="card-detail-info">
+          <div id="card-detail-type"></div>
+          <div id="card-detail-text"></div>
+          <div id="card-detail-abilities"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="graveyard-panel" hidden>
+      <div id="graveyard-panel-header">
+        <span id="graveyard-panel-title"></span>
+        <button id="graveyard-panel-close" class="secondary-button small-button">Close</button>
+      </div>
+      <div id="graveyard-panel-cards"></div>
+    </div>
+
+    <div id="targeting-banner" hidden></div>
+  </div>
+
+  <div id="card-tooltip" hidden></div>
+
+  <div id="gameover-overlay" hidden>
+    <div id="gameover-card">
+      <h2 id="gameover-text"></h2>
+      <button id="play-again-button" class="primary-button">Play again (same decks)</button>
+      <button id="new-deck-button" class="secondary-button">Choose new deck</button>
+    </div>
+  </div>
+
+  <script type="module" src="src/play.js"></script>
+</body>
+</html>

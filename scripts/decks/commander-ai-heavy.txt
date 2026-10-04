@@ -1,0 +1,16 @@
+10 Swamp
+10 Forest
+2 Overgrown Tomb
+2 Woodland Cemetery
+4 Blood Artist
+4 Zulaport Cutthroat
+4 Carrion Feeder
+4 Reassembling Skeleton
+4 Grave Pact
+4 Attrition
+4 Woe Strider
+4 Eternal Witness
+4 Massacre Wurm
+4 Mikaeus, the Unhallowed
+4 Sign in Blood
+4 Nature's Lore

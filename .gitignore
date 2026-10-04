@@ -1,0 +1,5 @@
+.DS_Store
+.claude/settings.local.json
+ai-cache.json
+node_modules/
+scripts/decks/*.png

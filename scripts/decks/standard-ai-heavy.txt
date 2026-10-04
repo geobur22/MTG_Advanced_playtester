@@ -1,0 +1,16 @@
+6 Mountain
+6 Island
+6 Swamp
+6 Plains
+3 Ragavan, Nimble Pilferer
+3 Fable of the Mirror-Breaker
+3 Ledger Shredder
+3 Bonecrusher Giant
+3 Solitude
+3 Murktide Regent
+3 Expressive Iteration
+3 Esper Sentinel
+3 Orcish Bowmasters
+3 The Meathook Massacre
+3 Reckoner Bankbuster
+3 Goldspan Dragon

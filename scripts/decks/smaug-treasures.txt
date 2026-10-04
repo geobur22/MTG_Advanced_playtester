@@ -1,0 +1,110 @@
+1 Academy Manufactor
+1 Alchemist's Talent
+1 Arcane Signet
+1 Bedevil
+1 Blasphemous Act
+1 Blinkmoth Urn
+1 Blood Crypt
+1 Bojuka Bog
+1 Bolt Bend
+1 Chain Lightning
+1 Champion's Helm
+1 Coin of Mastery
+1 Comet Storm
+1 Command Tower
+1 Crackle with Power
+1 Crime Novelist
+1 Cut of the Profits
+1 Cut Propulsion
+1 Dark Fortress
+1 Dark Ritual
+1 Dawnsire, Sunstar Dreadnought
+1 Deadly Dispute
+1 Diabolic Tutor
+1 Disciple of the Vault
+1 Dizzying Gaze
+1 Dragon's Fire
+1 Dragonskull Summit
+1 Electrodominance
+1 Exsanguinate
+1 Fiendlash
+1 Fiery Emancipation
+1 Foreboding Ruins
+1 Geothermal Bog
+1 Goldspan Dragon
+1 Haunted Ridge
+1 Hellkite Tyrant
+1 Inferno of the Star Mounts
+1 Ingenious Artillerist
+1 Into the Maw of Hell
+1 Jet Medallion
+1 Juri, Master of the Revue
+1 Kalain, Reclusive Painter
+1 Khaaaaaaaaaaaannn!
+1 Kiku's Shadow
+1 Lightning Bolt
+1 Magda, Brazen Outlaw
+1 Manaform Hellkite
+1 March of Wretched Sorrow
+1 Mayhem Devil
+1 Mirkwood Bats
+1 Mishra's Command
+1 Mountain
+1 Mountain
+1 Mountain
+1 Mountain
+1 Mountain
+1 Mountain
+1 Mountain
+1 Mountain
+1 Mountain
+1 Mountain
+1 Nadier's Nightblade
+1 Overmaster
+1 Pain for All
+1 Pariah's Shield
+1 Pestilence
+1 Phyrexian Arena
+1 Professional Face-Breaker
+1 Rain of Riches
+1 Rakdos Carnarium
+1 Rakdos Signet
+1 Reanimate
+1 Reckless Fireweaver
+1 Reliquary Tower
+1 Return the Favor
+1 Revel in Riches
+1 Rile
+1 Rogue's Passage
+1 Ruby Medallion
+1 Self-Destruct
+1 Shadowblood Ridge
+1 Shatterskull Smashing // Shatterskull, the Hammer Pass
+1 Simulacrum
+1 Smaug the Magnificent
+1 Smoldering Marsh
+1 Sol Ring
+1 Star of Extinction
+1 Stonesplitter Bolt
+1 Strip Mine
+1 Sulfurous Springs
+1 Swamp
+1 Swamp
+1 Swamp
+1 Swamp
+1 Swamp
+1 Swamp
+1 Swamp
+1 Swiftfoot Boots
+1 Tainted Peak
+1 Temple of the False God
+1 Terminate
+1 The Rollercrusher Ride
+1 The Sackville-Bagginses
+1 Thought Vessel
+1 Torch the Witness
+1 Valakut, the Molten Pinnacle
+1 Volcano Hellion
+1 Wasteland
+1 Wrathful Red Dragon
+1 Xorn

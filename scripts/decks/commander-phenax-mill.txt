@@ -1,0 +1,77 @@
+12 Island
+12 Swamp
+1 Watery Grave
+1 Command Tower
+1 Drowned Catacomb
+1 Choked Estuary
+1 Fetid Pools
+1 Polluted Delta
+1 Fabled Passage
+1 Evolving Wilds
+1 Terramorphic Expanse
+1 Path of Ancestry
+1 Bruvac the Grandiloquent
+1 Fraying Sanity
+1 Mesmeric Orb
+1 Traumatize
+1 Mind Grind
+1 Tome Scour
+1 Glimpse the Unthinkable
+1 Hedron Crab
+1 Sphinx's Tutelage
+1 Nemesis of Reason
+1 Sol Ring
+1 Arcane Signet
+1 Doom Blade
+1 Go for the Throat
+1 Sign in Blood
+1 Night's Whisper
+1 Fleet Swallower
+1 Psychic Corrosion
+1 Maddening Cacophony
+1 Ruin Crab
+1 Tasha's Hideous Laughter
+1 Jace's Erasure
+1 Duskmantle Guildmage
+1 Consuming Aberration
+1 Increasing Confusion
+1 Grinding Station
+1 Startled Awake
+1 Archive Trap
+1 Visions of Beyond
+1 Merfolk Secretkeeper
+1 Dimir Signet
+1 Talisman of Dominance
+1 Thought Vessel
+1 Rhystic Study
+1 Mystic Remora
+1 Toxic Deluge
+1 Damnation
+1 Cyclonic Rift
+1 Baleful Mastery
+1 Counterspell
+1 Negate
+1 Fact or Fiction
+1 Chart a Course
+1 Consider
+1 Opt
+1 Brainstorm
+1 Vampiric Tutor
+1 Demonic Tutor
+1 Notion Thief
+1 Windfall
+1 Peer into the Abyss
+1 Whispering Madness
+1 Reality Shift
+1 Baleful Strix
+1 Ophiomancer
+1 Nighthowler
+1 Diluvian Primordial
+1 Sepulchral Primordial
+1 Fblthp, the Lost
+1 Sea Gate Restoration
+1 Compulsive Research
+1 Thought Scour
+1 Perilous Research
+1 Dinrova Horror
+1 Sire of Stagnation

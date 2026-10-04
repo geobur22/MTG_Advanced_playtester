@@ -1,0 +1,40 @@
+6 Plains
+6 Island
+6 Swamp
+6 Mountain
+1 Smuggler's Copter
+1 Delver of Secrets
+1 Fire // Ice
+1 Ancestral Vision
+1 Treasure Cruise
+1 Hidden Strings
+1 Elderfang Ritualist
+1 Slogurk, the Overslime
+1 Bloodthirsty Adversary
+1 Gray Merchant of Asphodel
+1 Palace Sentinels
+1 Frogmite
+1 Firebolt
+1 Shimmer Myr
+1 Ruthless Ripper
+1 Hopeful Eidolon
+1 Bituminous Blast
+1 Fiery Temper
+1 Willbender
+1 Sea-Dasher Octopus
+1 Basilica Screecher
+1 Fiendslayer Paladin
+1 Grapeshot
+1 Rift Bolt
+1 Ragavan, Nimble Pilferer
+1 Solitude
+1 Orcish Bowmasters
+1 The Meathook Massacre
+1 Reckoner Bankbuster
+1 Esper Sentinel
+1 Ledger Shredder
+1 Bonecrusher Giant
+1 Fable of the Mirror-Breaker
+1 Expressive Iteration
+1 Murktide Regent
+1 Goldspan Dragon

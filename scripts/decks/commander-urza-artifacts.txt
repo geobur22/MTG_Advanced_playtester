@@ -1,0 +1,67 @@
+33 Island
+1 Command Tower
+1 Seat of the Synod
+1 Sol Ring
+1 Arcane Signet
+1 Mind Stone
+1 Thran Dynamo
+1 Grim Monolith
+1 Mana Vault
+1 Chromatic Lantern
+1 Etherium Sculptor
+1 Foundry Inspector
+1 Master Transmuter
+1 Metalworker
+1 Palladium Myr
+1 Solemn Simulacrum
+1 Wurmcoil Engine
+1 Myr Battlesphere
+1 Steel Hellkite
+1 Duplicant
+1 Sharuum the Hegemon
+1 Vedalken Archmage
+1 Trinket Mage
+1 Trophy Mage
+1 Fabricate
+1 Mystic Forge
+1 Whir of Invention
+1 Reshape
+1 Tinker
+1 Padeem, Consul of Innovation
+1 Emry, Lurker of the Loch
+1 Thought Monitor
+1 Ornithopter
+1 Memnite
+1 Signal Pest
+1 Pili-Pala
+1 Grand Architect
+1 Darksteel Ingot
+1 Everflowing Chalice
+1 Coalition Relic
+1 Prophetic Prism
+1 Consecrated Sphinx
+1 Blightsteel Colossus
+1 Kozilek, Butcher of Truth
+1 Platinum Angel
+1 Myr Enforcer
+1 Walking Ballista
+1 Hangarback Walker
+1 Rings of Brighthearth
+1 Basalt Monolith
+1 Voltaic Key
+1 Aetherflux Reservoir
+1 Kuldotha Forgemaster
+1 Academy Manufactor
+1 Static Orb
+1 Cyclonic Rift
+1 Counterspell
+1 Brainstorm
+1 Consider
+1 Opt
+1 Reality Shift
+1 Mystic Confluence
+1 Frantic Search
+1 Merchant Scroll
+1 Anticipate
+1 Fblthp, the Lost
+1 Curiosity

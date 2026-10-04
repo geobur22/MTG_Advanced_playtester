@@ -1,0 +1,71 @@
+15 Swamp
+15 Forest
+1 Overgrown Tomb
+1 Command Tower
+1 Woodland Cemetery
+1 Blooming Marsh
+1 Nurturing Peatland
+1 Fabled Passage
+1 Sol Ring
+1 Arcane Signet
+1 Golgari Signet
+1 Nature's Lore
+1 Farseek
+1 Cultivate
+1 Doom Blade
+1 Go for the Throat
+1 Putrefy
+1 Beast Within
+1 Feed the Swarm
+1 Fatal Push
+1 Sign in Blood
+1 Night's Whisper
+1 Read the Bones
+1 Grim Haruspex
+1 Fecundity
+1 Thallid
+1 Spore Frog
+1 Fungal Sprouting
+1 Thallid Omnivore
+1 Verdant Force
+1 Woodfall Primus
+1 Reclamation Sage
+1 Eternal Witness
+1 Meren of Clan Nel Toth
+1 The Meathook Massacre
+1 Woe Strider
+1 Viscera Seer
+1 Carrion Feeder
+1 Bastion of Remembrance
+1 Blood Artist
+1 Zulaport Cutthroat
+1 Midnight Reaper
+1 Grave Pact
+1 Dictate of Erebos
+1 Craterhoof Behemoth
+1 Massacre Wurm
+1 Grave Titan
+1 Solemn Simulacrum
+1 Perilous Forays
+1 Splendid Reclamation
+1 Golgari Grave-Troll
+1 Stinkweed Imp
+1 Deathrite Shaman
+1 Skullclamp
+1 Diabolic Tutor
+1 Attrition
+1 Bone Splinters
+1 Village Rites
+1 Vindictive Vampire
+1 Syr Konrad, the Grim
+1 Ashnod's Altar
+1 Phyrexian Altar
+1 Cauldron Familiar
+1 Witch's Oven
+1 Trail of Crumbs
+1 Yavimaya Elder
+1 Nissa, Vastwood Seer
+1 Ramunap Excavator
+1 Life from the Loam
+1 Jarad, Golgari Lich Lord
+1 Fauna Shaman

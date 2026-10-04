@@ -1,0 +1,13 @@
+9 Island
+9 Mountain
+2 Steam Vents
+4 Monastery Swiftspear
+4 Young Pyromancer
+4 Lightning Bolt
+4 Shock
+4 Opt
+4 Brainstorm
+4 Fireblast
+4 Wild Slash
+4 Reckless Charge
+4 Guttersnipe
