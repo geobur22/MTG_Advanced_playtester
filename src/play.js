@@ -31,7 +31,7 @@ let ui = {
   blockMap: [],           // { blockerId, attackerId }
   armedBlocker: null,
   mulliganBottomSelection: new Set(),
-  abilityChoice: null,    // { perm, activatableIndexes } — permanent with 2+ activatable abilities, awaiting a pick
+  abilityChoice: null,    // { perm, options: [{label, execute}] } — permanent with 2+ available actions, awaiting a pick
   equipChoice: null,      // { equipPermId } — Equipment armed, awaiting a click on a creature you control
   ninjutsuChoice: null,   // { ninjaInstanceId } — Ninja armed, awaiting a click on one of your own unblocked attackers
   graveyardView: null,    // playerId whose graveyard panel is open, or null
@@ -1096,12 +1096,11 @@ function renderActionBar() {
   }
 
   if (ui.abilityChoice) {
-    const { perm, activatableIndexes } = ui.abilityChoice;
-    const abilities = game.getTapAbilities(perm);
-    for (const i of activatableIndexes) {
-      buttons.appendChild(makeButton(abilities[i].effectText, 'primary', () => {
+    const { options } = ui.abilityChoice;
+    for (const opt of options) {
+      buttons.appendChild(makeButton(opt.label, 'primary', () => {
         ui.abilityChoice = null;
-        activateAbilityAtIndex(perm, i);
+        opt.execute();
       }));
     }
     buttons.appendChild(makeButton('Cancel', 'danger', () => { ui.abilityChoice = null; render(); }));
@@ -1423,7 +1422,7 @@ function handleTargetPick(target) {
     if (ui.targeting.collected.length >= ui.targeting.kinds.length) {
       const t = ui.targeting;
       ui.targeting = null;
-      if (t.source === 'ability') game.activateTapAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
+      if (t.source === 'ability') game.activateTapAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected, { chosenColor: t.chosenColor });
       else if (t.source === 'nonTapAbility') game.activateNonTapAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
       else if (t.source === 'loyaltyAbility') game.activateLoyaltyAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
       else if (t.source === 'commander') game.castCommander(HUMAN_ID, t.collected, t.xValue || 0);
@@ -1440,31 +1439,84 @@ function handleTargetPick(target) {
   }
 }
 
-// Activates one of a permanent's "{T}: ..." abilities — the only one, if it
-// has just one, or otherwise opens a choice menu (rendered in the action
-// bar, see renderActionBar's ui.abilityChoice branch) so the player picks
-// which one, exactly as they'd pick which spell to cast. Either way the
-// chosen ability then goes through the same targeting flow a spell does.
-function tryActivateAbility(perm) {
-  const abilities = game.getTapAbilities(perm);
-  const activatableIndexes = abilities.map((_, i) => i).filter(i => game.canActivateTapAbility(HUMAN_ID, perm.id, i));
-  if (activatableIndexes.length === 0) return;
-  if (activatableIndexes.length === 1) {
-    activateAbilityAtIndex(perm, activatableIndexes[0]);
+// Enumerates every action a permanent's own controller could currently take
+// on it — tap abilities, non-tap abilities, loyalty abilities, and equip —
+// as one flat list, so a click can offer a real choice whenever more than
+// one applies. Before this, handlePermanentClick picked ONE fixed category
+// via a hardcoded priority order (equip always won over a tap ability if
+// both happened to apply, and non-tap/loyalty abilities were reachable only
+// through the card-detail panel, never via a direct click at all) — a card
+// genuinely capable of two different things from the same click had no way
+// to reach the second one quickly.
+function getAvailableActionsForPermanent(perm) {
+  const actions = [];
+
+  game.getTapAbilities(perm).forEach((ability, i) => {
+    if (!game.canActivateTapAbility(HUMAN_ID, perm.id, i)) return;
+    // A dual/multicolor land's own "{T}: Add {W} or {U}" is ONE ability
+    // with a mana step that itself offers 2+ colors (see effects.js) — a
+    // single activate click would otherwise always go through
+    // pickAnyColorChoice's hand-aware heuristic with no way to override it.
+    // Splitting it into one action per color here lets a human choose
+    // directly, same as they'd choose which spell to cast; the AI never
+    // goes through this list at all, so its own activations are untouched.
+    const manaStep = ability.steps.find(s => s.kind === 'mana' && s.options?.length > 1);
+    if (manaStep) {
+      for (const color of manaStep.options) {
+        actions.push({ label: `Add {${color}}`, execute: () => activateAbilityAtIndex(perm, i, color) });
+      }
+    } else {
+      actions.push({ label: ability.effectText, execute: () => activateAbilityAtIndex(perm, i) });
+    }
+  });
+
+  game.getNonTapAbilities(perm).forEach((ability, i) => {
+    if (game.canActivateNonTapAbility(HUMAN_ID, perm.id, i)) {
+      actions.push({ label: ability.effectText, execute: () => activateNonTapAbilityAtIndex(perm, i) });
+    }
+  });
+
+  if (game.isPlaneswalker(perm.card)) {
+    game.getLoyaltyAbilities(perm).forEach((ability, i) => {
+      if (game.canActivateLoyaltyAbility(HUMAN_ID, perm.id, i)) {
+        const sign = ability.cost >= 0 ? '+' : '';
+        actions.push({ label: `${sign}${ability.cost}: ${ability.effectText}`, execute: () => activateLoyaltyAbilityAtIndex(perm, i) });
+      }
+    });
+  }
+
+  const equipCost = game.getEquipCost(perm);
+  if (equipCost && game.canActivateEquip(HUMAN_ID, perm.id) && game.affordabilityForEquip(HUMAN_ID, perm)) {
+    actions.push({ label: `Equip ${equipCost}`, execute: () => { ui.equipChoice = { equipPermId: perm.id }; render(); } });
+  }
+
+  return actions;
+}
+
+// Runs the permanent's one available action directly, or opens a choice
+// menu (rendered in the action bar, see renderActionBar's ui.abilityChoice
+// branch) when more than one applies — exactly as the player would pick
+// which spell to cast. Either way a chosen ability then goes through the
+// same targeting flow a spell does.
+function tryActivatePermanent(perm) {
+  const actions = getAvailableActionsForPermanent(perm);
+  if (actions.length === 0) return;
+  if (actions.length === 1) {
+    actions[0].execute();
     return;
   }
-  ui.abilityChoice = { perm, activatableIndexes };
+  ui.abilityChoice = { perm, options: actions };
   render();
 }
 
-function activateAbilityAtIndex(perm, abilityIndex) {
+function activateAbilityAtIndex(perm, abilityIndex, chosenColor = null) {
   if (!game.canActivateTapAbility(HUMAN_ID, perm.id, abilityIndex)) return;
   const kinds = game.getRequiredTargetKindsForAbility(perm, abilityIndex);
   if (kinds.length === 0) {
-    game.activateTapAbility(HUMAN_ID, perm.id, abilityIndex, []);
+    game.activateTapAbility(HUMAN_ID, perm.id, abilityIndex, [], { chosenColor });
     return;
   }
-  ui.targeting = { source: 'ability', card: perm.card, kinds, collected: [], permId: perm.id, abilityIndex };
+  ui.targeting = { source: 'ability', card: perm.card, kinds, collected: [], permId: perm.id, abilityIndex, chosenColor };
   render();
 }
 
@@ -1579,11 +1631,6 @@ function handlePermanentClick(perm, isOpponentPermanent) {
   }
 
   if (!isOpponentPermanent && !game.pendingRequest) {
-    if (game.getEquipCost(perm) && game.canActivateEquip(HUMAN_ID, perm.id) && game.affordabilityForEquip(HUMAN_ID, perm)) {
-      ui.equipChoice = { equipPermId: perm.id };
-      render();
-      return;
-    }
-    tryActivateAbility(perm);
+    tryActivatePermanent(perm);
   }
 }

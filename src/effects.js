@@ -2791,7 +2791,13 @@ function interpretEffectText(text) {
         kind: 'mana',
         options,
         targeting: 'none',
-        resolve: (game, ctx) => game.applyManaEffect(ctx, game.pickAnyColorChoice(ctx, options)),
+        // ctx.chosenColor is set when a human player picked a specific
+        // color directly (play.js offers one button per option instead of
+        // a single "activate" click whenever a tap ability's own mana step
+        // has more than one — see getAvailableActionsForPermanent); the AI
+        // never sets it, so pickAnyColorChoice's hand-aware heuristic still
+        // decides for every AI-controlled activation, same as before.
+        resolve: (game, ctx) => game.applyManaEffect(ctx, ctx.chosenColor || game.pickAnyColorChoice(ctx, options)),
       });
       continue;
     }

@@ -2225,7 +2225,13 @@ export class Game {
   }
 
   // targets: array aligned with getRequiredTargetKindsForAbility(perm, abilityIndex)
-  activateTapAbility(playerId, permId, abilityIndex, targets = [], { silent = false } = {}) {
+  // chosenColor: set when a human explicitly picked which color to add from
+  // a dual/multicolor land's own "{T}: Add {W} or {U}"-style ability (see
+  // play.js's getAvailableActionsForPermanent, which offers one button per
+  // color instead of a single activate click whenever there's more than
+  // one) — threaded into ctx.chosenColor for the mana step's own resolve to
+  // prefer over its usual pickAnyColorChoice heuristic.
+  activateTapAbility(playerId, permId, abilityIndex, targets = [], { silent = false, chosenColor = null } = {}) {
     if (!this.canActivateTapAbility(playerId, permId, abilityIndex)) return { ok: false, reason: 'Cannot activate that right now.' };
     const perm = this.findPermanent(permId);
     const ability = this.getTapAbilities(perm)[abilityIndex];
@@ -2251,7 +2257,7 @@ export class Game {
       else this.afterAction(playerId);
       return { ok: true };
     }
-    this.resolveEffectSteps(ability.steps, targets, { controllerId: playerId, card: perm.card, sourcePerm: perm });
+    this.resolveEffectSteps(ability.steps, targets, { controllerId: playerId, card: perm.card, sourcePerm: perm, chosenColor });
     this.checkStateBasedActions();
     if (silent) this.emit();
     else this.afterAction(playerId);

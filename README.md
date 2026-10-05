@@ -18,6 +18,8 @@ Paste a decklist (`4 Lightning Bolt` format, one per line) on the setup screen, 
 
 There's also a **Watch AI vs AI** mode if you just want to see how a deck's plan plays out without piloting it yourself.
 
+Clicking a permanent that can do more than one thing (a tap ability and an equip, a planeswalker with several loyalty abilities, Kenrith's five non-tap abilities, etc.) now pops up a choice menu instead of guessing which one you meant — same for a dual/multicolor land's mana ability, which offers one button per color instead of auto-picking for you.
+
 ## AI-assisted card interpretation (optional)
 
 Set `XAI_API_KEY` (from [console.x.ai](https://console.x.ai)) before running `server.mjs` and it'll use an AI model to interpret cards the regex patterns miss, automatically, the moment you submit a decklist. Without a key, unrecognized cards just resolve as a no-op — same as always, just dumber.
@@ -36,3 +38,5 @@ node scripts/findGaps.mjs
 Turn structure, priority, the stack, combat (first strike, trample, deathtouch, flying, menace, etc.), most triggered and activated abilities, Commander format, modal spells, equipment, planeswalkers, and a decent chunk of the interpreter's own pattern library for common spell/trigger shapes — covers a lot of constructed and Commander staples out of the box.
 
 Not modeled: 4-player multiplayer, Vehicles/Crew, transforming/adventure/split cards (only the front face works), and delayed triggers that fire on some future event rather than at resolution. These are real architecture gaps, not small missing patterns — see the comments in `src/effects.js`/`src/game.js` if you want to dig in.
+
+The AI knows better than to loop pointlessly on a break-even combo (Basalt Monolith's own tap-for-3/pay-3-to-untap, say) — fixed after `findGaps.mjs` caught it tripping the action safety cap instead of ever doing anything useful with its turn.

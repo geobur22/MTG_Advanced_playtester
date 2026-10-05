@@ -3,10 +3,34 @@
 // and will fire off removal/burn at instant speed when it clearly helps.
 
 import { isFullyUnsupported as isFullyUnsupportedSteps, hasLifePaymentXCost } from './effects.js';
+import { parseManaCost, totalCmc } from './mana.js';
 
 function isCreature(g, card) { return g.isCreature(card); }
 function isLand(g, card) { return g.isLand(card); }
 function isAura(g, card) { return g.isAura(card); }
+
+// Basalt Monolith/Grim Monolith-style "{T}: Add {C}{C}{C}." + "{3}: Untap
+// this artifact." is a genuine break-even loop in real Magic — it only
+// becomes profitable with a mana doubler (Rings of Brighthearth, Power
+// Artifact), so a human would never bother activating the untap on its own.
+// Without this check the AI's "activate whatever's affordable" loop below
+// has no such judgment and would tap-for-mana/pay-to-untap forever,
+// achieving nothing and burning its whole turn on the safety cap instead of
+// ever doing anything useful with the mana (confirmed live: exactly this
+// loop on Basalt Monolith tripped Game.AI_ACTION_SAFETY_CAP in a real
+// Urza, Lord High Artificer game). Only returns false for a plain "pay N to
+// untap" ability whose own permanent's tap-for-mana ability wouldn't
+// produce MORE than N — anything that nets a real gain, or where the
+// permanent's own tap ability isn't mana at all (so there's no generic way
+// to judge it), is unaffected.
+function isWorthwhilePayToUntap(game, perm, ability) {
+  if (ability.steps.length !== 1 || ability.steps[0].kind !== 'untap') return true;
+  const manaStep = game.getTapAbilities(perm).flatMap(a => a.steps).find(s => s.kind === 'mana');
+  if (!manaStep) return true;
+  const produced = manaStep.colors?.length || manaStep.amount || 1;
+  const untapCost = totalCmc(parseManaCost(ability.manaCost || ''));
+  return produced > untapCost;
+}
 
 // Auras get a blanket 'permanent' targeting kind regardless of what they
 // actually do (see getRequiredTargetKinds), so a removal-style aura like
@@ -305,6 +329,7 @@ export function takeAITurnAction(game) {
         const ability = abilities[i];
         if (isFullyUnsupportedSteps(ability.steps)) continue; // no point activating a no-op
         if (ability.sacrifice && p.battlefield.filter(x => isCreature(game, x.card)).length < 2) continue;
+        if (!isWorthwhilePayToUntap(game, perm, ability)) continue;
         if (!game.canActivateNonTapAbility(p.id, perm.id, i)) continue;
         const kinds = game.getRequiredTargetKindsForNonTapAbility(perm, i);
         const targets = pickTargetsForKinds(game, perm.card, p.id, kinds).filter(Boolean);
