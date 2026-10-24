@@ -3,3 +3,4 @@
 ai-cache.json
 node_modules/
 scripts/decks/*.png
+reference/

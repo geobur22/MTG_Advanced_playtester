@@ -2,7 +2,7 @@
 // attacks when it's ahead or safe, blocks to avoid unnecessary damage/losses,
 // and will fire off removal/burn at instant speed when it clearly helps.
 
-import { isFullyUnsupported as isFullyUnsupportedSteps, hasLifePaymentXCost } from './effects.js';
+import { isFullyUnsupported as isFullyUnsupportedSteps, hasLifePaymentXCost, getBloodthirstAmount } from './effects.js';
 import { parseManaCost, totalCmc } from './mana.js';
 
 function isCreature(g, card) { return g.isCreature(card); }
@@ -180,11 +180,25 @@ export function takeAITurnAction(game) {
     if (!p.landPlayedThisTurn) {
       const land = p.hand.find(c => isLand(game, c));
       if (land) { game.playLand(p.id, land.instanceId); return; }
+      // No land to play: a landcycler (Ash Barrens, the Plainscycling
+      // cycle, ...) can go find one first, and the land drop then happens
+      // on the very next action.
+      const landcycler = p.hand.find(c => /land|plains|island|swamp|mountain|forest/.test(game.getCyclingAbility(c)?.searchType || '') && game.canCycle(p.id, c.instanceId));
+      if (landcycler) { game.cycle(p.id, landcycler.instanceId); return; }
     }
-    // Tap any available mana-producing abilities up front so casting checks
-    // below see the full mana we could have available this turn.
+    // Tap NON-LAND mana sources (Sol Ring, Llanowar Elves, ...) up front so
+    // casting checks below see the full mana available this turn — the
+    // payment planner only counts untapped lands directly, so anything else
+    // has to be in the pool to count. Lands are deliberately left alone:
+    // the planner already taps exactly the ones a payment needs, and
+    // tapping them all here (as this used to) burned any mana the AI didn't
+    // spend — the pool empties every step, and lands only untap in their
+    // controller's own untap step, so they sat tapped through main 2 AND
+    // the opponent's whole turn. That quietly broke both holding a creature
+    // for main 2 and ever casting an instant on the opponent's turn
+    // (Dimir Control cast zero off-turn spells across 8 games before this).
     for (const perm of p.battlefield) {
-      if (perm.tapped) continue;
+      if (perm.tapped || isLand(game, perm.card)) continue;
       game.getTapAbilities(perm).forEach((ability, idx) => {
         if (ability.isManaAbility && game.canActivateTapAbility(p.id, perm.id, idx)) {
           game.activateTapAbility(p.id, perm.id, idx, [], { silent: true });
@@ -258,6 +272,11 @@ export function takeAITurnAction(game) {
       .filter(c => !isLand(game, c) && game.canCastSpell(p.id, c) && game.affordability(p.id, c))
       .sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
     for (const card of playable) {
+      // Bloodthirst only pays off once the opponent has been dealt damage
+      // this turn — so before combat, hold the creature for the second main
+      // phase instead of casting it as a vanilla body. Still cast it in
+      // main 2 either way, damage or not.
+      if (game.step === 'main1' && getBloodthirstAmount(card) > 0 && game.opponentOf(p.id).damageTakenThisTurn === 0) continue;
       const modal = game.getSpellModes(card);
       let modeIndexes = null;
       if (modal) {
@@ -339,6 +358,29 @@ export function takeAITurnAction(game) {
       }
     }
 
+    // Non-mana tap abilities (Icy Manipulator, Prodigal Pyromancer, a
+    // fetchland, Food, Outlast, ...). Mana abilities are already tapped up
+    // front above; before this, nothing else ever used a {T} ability, so
+    // every one of these was inert in the AI's hands. A creature's own tap
+    // ability waits for the second main phase, so using it never costs an
+    // attack; anything else fires whenever it's affordable. No loop risk —
+    // a tapped permanent can't activate again until it untaps.
+    for (const perm of p.battlefield) {
+      if (perm.tapped) continue;
+      if (isCreature(game, perm.card) && game.step !== 'main2') continue;
+      const abilities = game.getTapAbilities(perm);
+      for (let i = 0; i < abilities.length; i++) {
+        const ability = abilities[i];
+        if (ability.isManaAbility || isFullyUnsupportedSteps(ability.steps)) continue;
+        if (!game.canActivateTapAbility(p.id, perm.id, i)) continue;
+        const kinds = game.getRequiredTargetKindsForAbility(perm, i);
+        const targets = pickTargetsForKinds(game, perm.card, p.id, kinds, perm.id).filter(Boolean);
+        if (game.getMinRequiredTargetCountForAbility(perm, i) > targets.length) continue;
+        const result = game.activateTapAbility(p.id, perm.id, i, targets);
+        if (result.ok) return;
+      }
+    }
+
     // Planeswalker loyalty abilities — once per planeswalker per turn.
     // Prefers the most powerful safely-affordable ability (most negative
     // cost first, since a planeswalker's biggest, most game-swinging
@@ -366,9 +408,32 @@ export function takeAITurnAction(game) {
     // ...) — bring back a body if there's mana to spare, same "otherwise it
     // just sits unused" logic as equip/non-tap abilities above.
     for (const entry of game.getGraveyardAbilities(p.id)) {
+      // An unearthed creature is exiled at this turn's end step, so its
+      // whole value is attacking this turn — after combat it's pure waste.
+      if (entry.abilities[0].unearth && game.step !== 'main1') continue;
       if (!game.canActivateGraveyardAbility(p.id, entry.card.instanceId)) continue;
-      const result = game.activateGraveyardAbility(p.id, entry.card.instanceId);
+      // Scavenge: grow our own biggest creature; never feed the opponent's.
+      let targets = [];
+      if (entry.abilities[0].scavenge) {
+        const own = p.battlefield.filter(perm => isCreature(game, perm.card));
+        if (own.length === 0) continue;
+        const best = own.sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0];
+        targets = [{ type: 'permanent', id: best.id }];
+      }
+      const result = game.activateGraveyardAbility(p.id, entry.card.instanceId, targets);
       if (result.ok) return;
+    }
+
+    // Cycle away dead cards with mana left over after everything above: a
+    // cycling land once there's plenty of mana already, or a spell still far
+    // too expensive to cast any time soon. Landcyclers are kept for the
+    // land-drop branch at the top instead.
+    const landCount = p.battlefield.filter(perm => isLand(game, perm.card)).length;
+    for (const card of p.hand) {
+      const cycling = game.getCyclingAbility(card);
+      if (!cycling || cycling.searchType) continue;
+      const dead = isLand(game, card) ? landCount >= 6 : (card.cmc || 0) > landCount + 3;
+      if (dead && game.canCycle(p.id, card.instanceId)) { game.cycle(p.id, card.instanceId); return; }
     }
 
     game.pass(p.id);
@@ -416,6 +481,26 @@ export function takeAITurnAction(game) {
         const result = game.castSpell(p.id, card.instanceId, targets, xValue);
         if (result.ok) return;
       }
+    }
+  }
+
+  // End of the opponent's turn: any mana still untapped is about to go to
+  // waste, so this is the classic moment to cycle. Looser than the
+  // main-phase rule since nothing else competes for this mana — cycle a
+  // spell that won't be castable next turn even after a land drop, a
+  // cycling land once there's plenty of mana, or a landcycler while still
+  // short on lands.
+  if (game.step === 'end' && game.active.id !== p.id && game.stack.length === 0) {
+    const landCount = p.battlefield.filter(perm => isLand(game, perm.card)).length;
+    for (const card of p.hand) {
+      const cycling = game.getCyclingAbility(card);
+      if (!cycling || !game.canCycle(p.id, card.instanceId)) continue;
+      const isLandcycler = /land|plains|island|swamp|mountain|forest/.test(cycling.searchType || '');
+      const worthIt = isLandcycler ? landCount < 5
+        : cycling.searchType ? false
+        : isLand(game, card) ? landCount >= 6
+        : (card.cmc || 0) > landCount + 1;
+      if (worthIt) { game.cycle(p.id, card.instanceId); return; }
     }
   }
 

@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 
 export const STEP_ORDER = [
@@ -195,6 +195,7 @@ function makePermanent(card, controllerId) {
     skipNextUntap: false, // one-shot "doesn't untap during its controller's next untap step" (Frost Breath) — consumed the next time the untap step checks it
     wasKicked: false, // set by resolveTop when the caster paid this spell's optional Kicker cost — see castSpell's `kicked` parameter
     escaped: false, // set by resolveTop when this permanent was cast via its own Escape cost — see castFromGraveyard
+    unearthed: false, // returned via Unearth — exiled at the next end step or if it would leave the battlefield; see exileIfUnearthed
     // Class enchantments (Alchemist's Talent, Ranger Class, ...) — classLevel
     // starts at 1 the moment a Class enters (set by triggerETB) and climbs
     // via levelUpClass; classOriginalOracleText is the untouched printed
@@ -1075,6 +1076,7 @@ export class Game {
       return;
     }
     if (step === 'end') {
+      this.exileUnearthedPermanents();
       this.triggerPhase(interpretEndStepTriggers);
       this.openPriorityWindow();
       return;
@@ -1557,7 +1559,7 @@ export class Game {
   // whether to opt into Kicker (see castSpell's `kicked` param) instead of
   // always casting unkicked. Returns false for a card with no Kicker cost.
   canAffordKicked(playerId, card) {
-    const kickerCost = getKickerCost(card);
+    const kickerCost = this.getOptionalAdditionalCost(card);
     if (!kickerCost) return false;
     const p = this.getPlayer(playerId);
     const parsed = parseManaCost(card.manaCost + kickerCost);
@@ -1633,7 +1635,7 @@ export class Game {
       const lifePaymentX = hasLifePaymentXCost(card);
       if (lifePaymentX && xValue >= p.life) return { ok: false, reason: 'Not enough life to pay.' };
 
-      kickerCost = kicked ? getKickerCost(card) : null;
+      kickerCost = kicked ? this.getOptionalAdditionalCost(card) : null;
       // Concatenating the two cost STRINGS before parsing (rather than
       // parsing each separately and adding the results) reuses
       // parseManaCost's own symbol-scanning as-is — it just sees more
@@ -1669,12 +1671,13 @@ export class Game {
       targets,
       xValue,
       modeIndexes,
-      kicked: !!kickerCost,
+      kicked: !!kickerCost && !!getKickerCost(card),
+      buyback: !!kickerCost && !getKickerCost(card) && !!getBuybackCost(card),
       isPermanentSpell: isPermanentType(card) && !isAura(card),
       isAura: isAura(card),
     };
     this.stack.push(stackItem);
-    this.log(`${p.name} casts ${card.name}${stackItem.kicked ? ' (kicked)' : ''}${free ? ' without paying its mana cost' : ''}.`);
+    this.log(`${p.name} casts ${card.name}${stackItem.kicked ? ' (kicked)' : ''}${stackItem.buyback ? ' (with buyback)' : ''}${free ? ' without paying its mana cost' : ''}.`);
     this.triggerCastSpell(playerId, card);
     this.triggerBecomesTarget(targets);
     this.maybeCounterForWard(stackItem);
@@ -1967,6 +1970,14 @@ export class Game {
         const amount = entersWith.isX ? (item.xValue || 0) : entersWith.amount;
         if (amount > 0) this.applyCounterAdditionEffect({ controllerId, card, target: { type: 'permanent', id: perm.id } }, amount, '+1/+1');
       }
+      // Bloodthirst: same "enters with" replacement, conditional on an
+      // opponent having been DEALT DAMAGE this turn (not merely losing
+      // life — damageTakenThisTurn only counts real damage).
+      const bloodthirst = getBloodthirstAmount(card);
+      if (bloodthirst > 0 && this.opponentOf(controllerId).damageTakenThisTurn > 0) {
+        this.log(`${card.name}'s bloodthirst is satisfied.`);
+        this.applyCounterAdditionEffect({ controllerId, card, target: { type: 'permanent', id: perm.id } }, bloodthirst, '+1/+1');
+      }
       this.checkStateBasedActions();
       this.triggerETB(perm, item.xValue || 0);
       if (isSaga(card)) this.advanceSaga(perm);
@@ -2033,6 +2044,13 @@ export class Game {
       // to a different player's exile than the `p.exile` case above.
       this.getPlayer(item.exileToOwnerId).exile.push(card);
       this.log(`${card.name} is exiled instead of returning to its owner's graveyard.`);
+    } else if (item.buyback) {
+      // Buyback paid: "put this card into your hand as it resolves." Only on
+      // RESOLUTION — a countered buyback spell still goes to the graveyard
+      // (that path never reaches here), and the cast-from-graveyard exile
+      // replacements above win, same as real rules.
+      this.getPlayer(item.ownerId || controllerId).hand.push(card);
+      this.log(`${card.name} returns to its owner's hand (buyback).`);
     } else {
       // Normally the caster's own graveyard, EXCEPT when the card's real
       // owner is someone else (Etali, Primal Storm casting an opponent's
@@ -2137,6 +2155,7 @@ export class Game {
     // right moment, so neither needs separate call sites of its own.
     this.triggerTribalEtb(perm);
     this.triggerAnyEtb(perm);
+    this.triggerFabricate(perm);
 
     const steps = interpretPermanentTriggers(perm.card);
     if (steps.length === 0) return;
@@ -2182,6 +2201,61 @@ export class Game {
     return true;
   }
 
+  // A generic "choose one" prompt for keyword abilities that offer a real
+  // choice (Fabricate's counters-or-Servos, ...). options: [{ label,
+  // resolve }]. An AI player resolves aiPickIndex immediately; a human gets
+  // a pendingRequest of plain labels, one button each in the action bar.
+  // The resolve closures live in _pendingChoice rather than pendingRequest
+  // because pendingRequest is deep-cloned for undo and can't hold
+  // functions — the same split as _pendingETB above.
+  requestChoice(playerId, prompt, options, aiPickIndex = 0) {
+    if (this.getPlayer(playerId).isAI) {
+      options[aiPickIndex].resolve();
+      return;
+    }
+    this._pendingChoice = options;
+    this.pendingRequest = { type: 'choice', playerId, prompt, labels: options.map(o => o.label) };
+    this.emit();
+  }
+
+  makeChoice(playerId, index) {
+    if (this.pendingRequest?.type !== 'choice' || this.pendingRequest.playerId !== playerId) return false;
+    const option = this._pendingChoice?.[index];
+    if (!option) return false;
+    this.pendingRequest = null;
+    this._pendingChoice = null;
+    option.resolve();
+    this.checkStateBasedActions();
+    this.emit();
+    this.maybeLetAIAct();
+    return true;
+  }
+
+  // Fabricate N: "when this creature enters, put N +1/+1 counters on it or
+  // create N 1/1 colorless Servo artifact creature tokens." The AI goes wide
+  // (Servos) when it has fewer creatures than its opponent — bodies to
+  // block with — and otherwise grows the creature itself.
+  triggerFabricate(perm) {
+    const n = getFabricateAmount(perm.card);
+    if (!n) return;
+    const ctx = { controllerId: perm.controllerId, card: perm.card, sourcePerm: perm };
+    const mine = this.getPlayer(perm.controllerId).battlefield.filter(x => isCreature(x.card)).length;
+    const theirs = this.opponentOf(perm.controllerId).battlefield.filter(x => isCreature(x.card)).length;
+    this.requestChoice(perm.controllerId, `${perm.card.name} — Fabricate ${n}`, [
+      {
+        label: `Put ${n} +1/+1 counter${n > 1 ? 's' : ''} on ${perm.card.name}`,
+        resolve: () => {
+          if (!this.findPermanent(perm.id)) return;
+          this.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: perm.id } }, n, '+1/+1');
+        },
+      },
+      {
+        label: `Create ${n} 1/1 Servo token${n > 1 ? 's' : ''}`,
+        resolve: () => this.applyTokenEffect(ctx, n, 1, 1, 'colorless servo artifact'),
+      },
+    ], mine < theirs ? 1 : 0);
+  }
+
   // ---------- activated (tap) abilities ----------
 
   getTapAbilities(perm) {
@@ -2208,6 +2282,7 @@ export class Game {
     if (isCreature(perm.card) && perm.summoningSick && !this.effectiveKeywords(perm).has('haste')) return false;
     const ability = this.getTapAbilities(perm)[abilityIndex];
     if (!ability) return false;
+    if (ability.sorcerySpeedOnly && !(playerId === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
     // Arrest/Faith's Fetters-style "its activated abilities can't be
     // activated [unless they're mana abilities]" restriction.
     const restrictionKws = this.effectiveKeywords(perm);
@@ -2450,31 +2525,143 @@ export class Game {
       const sorcerySpeedOk = p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0;
       if (!sorcerySpeedOk) return false;
     }
+    // Scavenge needs some creature to target at all.
+    if (ability.scavenge && !this.players.some(pl => pl.battlefield.some(perm => isCreature(perm.card) && this.canBeTargetedBy(perm, playerId)))) return false;
     const parsed = parseManaCost(ability.manaCost);
     const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
     return !!planManaPayment(untapped, parsed, 0, p.manaPool);
   }
 
-  activateGraveyardAbility(playerId, cardInstanceId) {
+  // targets: only Scavenge takes one (a creature) — see interpretGraveyardAbilities.
+  activateGraveyardAbility(playerId, cardInstanceId, targets = []) {
     if (!this.canActivateGraveyardAbility(playerId, cardInstanceId)) return { ok: false, reason: 'Cannot activate that right now.' };
     const p = this.getPlayer(playerId);
     const idx = p.graveyard.findIndex(c => c.instanceId === cardInstanceId);
     const card = p.graveyard[idx];
     const ability = interpretGraveyardAbilities(card)[0];
+    let scavengeTarget = null;
+    if (ability.scavenge) {
+      const t = targets[0];
+      scavengeTarget = t?.type === 'permanent' ? this.findPermanent(t.id) : null;
+      if (!scavengeTarget || !isCreature(scavengeTarget.card)) return { ok: false, reason: 'Scavenge needs a target creature.' };
+    }
     const parsed = parseManaCost(ability.manaCost);
     const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
     const payment = planManaPayment(untapped, parsed, 0, p.manaPool);
     for (const land of payment.lands) land.tapped = true;
     for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
     p.graveyard.splice(idx, 1);
+    if (ability.scavenge) {
+      // Exiling the card is part of the cost, so it's gone even if Ward
+      // then counters the ability.
+      p.exile.push(card);
+      const amount = parseInt(card.power, 10) || 0;
+      this.log(`${p.name} scavenges ${card.name}, targeting ${scavengeTarget.card.name}.`);
+      if (!this.checkWardAndMaybeCounter(playerId, targets) && amount > 0) {
+        this.applyCounterAdditionEffect({ controllerId: playerId, card, target: { type: 'permanent', id: scavengeTarget.id } }, amount, '+1/+1');
+      }
+      this.checkStateBasedActions();
+      this.afterAction(playerId);
+      return { ok: true };
+    }
     const perm = makePermanent(card, playerId);
     if (ability.tapped) perm.tapped = true;
+    if (ability.unearth) {
+      perm.unearthed = true;
+      perm.tempKeywords.push('haste');
+    }
     p.battlefield.push(perm);
-    this.log(`${p.name} returns ${card.name} from their graveyard to the battlefield${ability.tapped ? ' tapped' : ''}.`);
+    this.log(`${p.name} ${ability.unearth ? 'unearths' : 'returns'} ${card.name} from their graveyard to the battlefield${ability.tapped ? ' tapped' : ''}.`);
     this.checkStateBasedActions();
     this.triggerETB(perm);
     this.afterAction(playerId);
     return { ok: true };
+  }
+
+  // ---------- cycling (an ability activated from the HAND) ----------
+  // Instant speed: usable any time the player has priority. The card is
+  // discarded as part of the cost; "when you cycle this card" triggers
+  // resolve before the draw/search, matching real stack order.
+
+  getCyclingAbility(card) { return getCyclingAbility(card); }
+
+  canCycle(playerId, instanceId) {
+    if (this.gameOver || this.pendingRequest) return false;
+    if (this.priorityPlayer.id !== playerId) return false;
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    if (!card) return false;
+    const cycling = getCyclingAbility(card);
+    if (!cycling) return false;
+    const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
+    return !!planManaPayment(untapped, parseManaCost(cycling.manaCost), 0, p.manaPool);
+  }
+
+  cycle(playerId, instanceId) {
+    if (!this.canCycle(playerId, instanceId)) return { ok: false, reason: 'Cannot cycle that right now.' };
+    const p = this.getPlayer(playerId);
+    const idx = p.hand.findIndex(c => c.instanceId === instanceId);
+    const card = p.hand[idx];
+    const cycling = getCyclingAbility(card);
+    const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
+    const payment = planManaPayment(untapped, parseManaCost(cycling.manaCost), 0, p.manaPool);
+    for (const land of payment.lands) land.tapped = true;
+    for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
+    p.hand.splice(idx, 1);
+    p.graveyard.push(card);
+    this.log(`${p.name} cycles ${card.name} (${cycling.manaCost}).`);
+    const ctx = { controllerId: playerId, card };
+    // A "when you cycle" trigger that needs a target isn't modeled — there's
+    // no hand-zone source to drive a targeting prompt from — so only
+    // untargeted ones (Krosan Tusker's land search, the Decrees' sweepers)
+    // resolve; a targeted one is logged rather than silently skipped.
+    const triggerSteps = interpretCycleTriggers(card);
+    if (triggerSteps.length > 0) {
+      if (expandTargetKinds(triggerSteps).length === 0) this.resolveEffectSteps(triggerSteps, [], ctx);
+      else this.log(`${card.name}'s targeted cycle trigger isn't modeled in detail yet — it resolves with no game effect.`);
+    }
+    if (cycling.searchType) this.applyTutorEffect(ctx, cycling.searchType);
+    else this.applyDrawEffect(ctx, 1);
+    this.checkStateBasedActions();
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  // Exalted: "whenever a creature you control attacks alone, that creature
+  // gets +1/+1 until end of turn" — one trigger per exalted instance the
+  // attacking player controls, on any permanent type (Cathedral of War is
+  // a land, Finest Hour an enchantment), so they stack.
+  applyExalted(playerId, attacker) {
+    const p = this.getPlayer(playerId);
+    const count = p.battlefield.filter(perm => this.effectiveKeywords(perm).has('exalted')).length;
+    if (count === 0) return;
+    attacker.tempBuffs.push({ power: count, toughness: count });
+    this.log(`Exalted: ${attacker.card.name} attacks alone and gets +${count}/+${count} until end of turn.`);
+  }
+
+  // Unearth's "if it would leave the battlefield, exile it instead" — called
+  // by each battlefield-to-graveyard/hand path right before it would put
+  // the card in its destination zone. Returns true when it handled the move.
+  exileIfUnearthed(perm) {
+    if (!perm.unearthed) return false;
+    this.getPlayer(perm.ownerId).exile.push(perm.card);
+    this.log(`${perm.card.name} is exiled instead (unearth).`);
+    return true;
+  }
+
+  // Unearth's other half: "exile it at the beginning of the next end step."
+  // Unearth is sorcery-speed, so the next end step is always this same
+  // turn's — no per-permanent turn bookkeeping needed.
+  exileUnearthedPermanents() {
+    for (const p of this.players) {
+      for (const perm of p.battlefield.filter(x => x.unearthed)) {
+        p.battlefield = p.battlefield.filter(x => x.id !== perm.id);
+        this.detachFromLeavingBattlefield(perm);
+        this.triggerLeavesBattlefield(perm);
+        this.getPlayer(perm.ownerId).exile.push(perm.card);
+        this.log(`${perm.card.name} is exiled at the beginning of the end step (unearth).`);
+      }
+    }
   }
 
   // ---------- equip (Equipment's "Equip {cost}" ability) ----------
@@ -4156,6 +4343,7 @@ export class Game {
     p.battlefield = p.battlefield.filter(x => x.id !== perm.id);
     this.detachFromLeavingBattlefield(perm);
     this.triggerLeavesBattlefield(perm);
+    if (this.exileIfUnearthed(perm)) return;
     if (this.redirectCommanderToZone(perm)) return;
     owner.hand.push(perm.card);
     this.log(`${ctx.card.name} returns ${perm.card.name} to ${owner.name}'s hand.`);
@@ -4230,6 +4418,7 @@ export class Game {
     p.battlefield = p.battlefield.filter(x => x.id !== cheapest.id);
     this.detachFromLeavingBattlefield(cheapest);
     this.triggerLeavesBattlefield(cheapest);
+    if (this.exileIfUnearthed(cheapest)) { this.checkStateBasedActions(); return; }
     owner.hand.push(cheapest.card);
     this.log(`${ctx.card.name} returns ${cheapest.card.name} to ${owner.name}'s hand.`);
     this.checkStateBasedActions();
@@ -4503,6 +4692,10 @@ export class Game {
     // sacrifice is a sacrifice the moment it happens, regardless of what
     // happens to the permanent afterward.
     if (sacrifice) this.triggerSacrifice(perm);
+
+    // Unearth's replacement: it never reaches the graveyard, so it doesn't
+    // "die" either — checked before undying/persist and the dies trigger.
+    if (this.exileIfUnearthed(perm)) return;
 
     // Undying/persist: the creature still dies (so "dies" triggers still
     // see it), but a replacement effect returns it right away with a
@@ -4990,6 +5183,7 @@ export class Game {
       this.triggerWhenYouAttack(playerId);
       this.triggerEnchantedPlayerAttacked(opponent.id);
     }
+    if (newAttackers.length === 1) this.applyExalted(playerId, newAttackers[0]);
     this.pendingRequest = null;
     const anyAttackers = p.battlefield.some(x => x.attacking);
     this.log(anyAttackers
@@ -5093,7 +5287,7 @@ export class Game {
     // battlefield (an attached Aura/Equipment falls off or unattaches).
     this.detachFromLeavingBattlefield(attacker);
     p.battlefield = p.battlefield.filter(x => x.id !== attacker.id);
-    this.getPlayer(attacker.ownerId).hand.push(attacker.card);
+    if (!this.exileIfUnearthed(attacker)) this.getPlayer(attacker.ownerId).hand.push(attacker.card);
     this.log(`${p.name} returns ${attacker.card.name} to hand to ninjutsu in ${ninjaCard.name}.`);
 
     p.hand.splice(idx, 1);
@@ -5285,6 +5479,13 @@ export class Game {
   hasLifePaymentXCost(card) { return hasLifePaymentXCost(card); }
 
   getKickerCost(card) { return getKickerCost(card); }
+  getBuybackCost(card) { return getBuybackCost(card); }
+
+  // The one optional additional cost a spell offers, if any — Kicker or
+  // Buyback. Both go through the same `kicked` flag on castSpell (and the
+  // same "pay extra?" decision for the AI and the human prompt); the stack
+  // item records which one it was, since their payoffs differ.
+  getOptionalAdditionalCost(card) { return getKickerCost(card) || getBuybackCost(card); }
 
   // The most life a "pay X life as an additional cost" spell (Toxic
   // Deluge) can reasonably ask for — leaves at least 1, since paying

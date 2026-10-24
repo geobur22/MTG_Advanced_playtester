@@ -37,6 +37,10 @@ node scripts/findGaps.mjs
 
 Turn structure, priority, the stack, combat (first strike, trample, deathtouch, flying, menace, etc.), most triggered and activated abilities, Commander format, modal spells, equipment, planeswalkers, and a decent chunk of the interpreter's own pattern library for common spell/trigger shapes — covers a lot of constructed and Commander staples out of the box.
 
+Keyword coverage is being worked through against the Comprehensive Rules' full keyword list (702.x). Recently added: Cycling (including landcycling/typecycling and "when you cycle" triggers), Buyback, Exalted, Unearth, Bloodthirst, Fabricate, Scavenge, and Outlast. A card that can be cast *or* cycled offers both as a choice, and Fabricate asks you whether you want the counters or the Servos.
+
+That pass also turned up two AI bugs worth knowing about. The AI was tapping every land at the start of each main phase whether it spent the mana or not, so unspent mana evaporated and its lands sat tapped through its second main phase and your whole turn — it could never actually hold up a counterspell. It casts noticeably more spells per game now. It also never used a non-mana `{T}` ability at all (Icy Manipulator, fetchlands, Food, etc.), which it now does.
+
 Not modeled: 4-player multiplayer, Vehicles/Crew, transforming/adventure/split cards (only the front face works), and delayed triggers that fire on some future event rather than at resolution. These are real architecture gaps, not small missing patterns — see the comments in `src/effects.js`/`src/game.js` if you want to dig in.
 
 The AI knows better than to loop pointlessly on a break-even combo (Basalt Monolith's own tap-for-3/pay-3-to-untap, say) — fixed after `findGaps.mjs` caught it tripping the action safety cap instead of ever doing anything useful with its turn.

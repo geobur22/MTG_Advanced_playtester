@@ -341,8 +341,17 @@ function renderGraveyardView() {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'action-button primary graveyard-activate-button';
-      btn.textContent = 'Activate';
-      btn.addEventListener('click', () => game.activateGraveyardAbility(HUMAN_ID, card.instanceId));
+      const gyAbility = game.getGraveyardAbilities(HUMAN_ID).find(e => e.card.instanceId === card.instanceId)?.abilities[0];
+      btn.textContent = gyAbility?.unearth ? `Unearth ${gyAbility.manaCost}` : gyAbility?.scavenge ? `Scavenge ${gyAbility.manaCost}` : 'Activate';
+      btn.addEventListener('click', () => {
+        if (ui.abilityChoice || ui.equipChoice || ui.ninjutsuChoice || ui.targeting || game.pendingRequest) return;
+        if (gyAbility?.targetKinds) {
+          ui.targeting = { source: 'graveyardAbility', card, kinds: gyAbility.targetKinds, collected: [], cardInstanceId: card.instanceId };
+          render();
+          return;
+        }
+        game.activateGraveyardAbility(HUMAN_ID, card.instanceId);
+      });
       div.appendChild(btn);
     }
     // Flashback and Escape — casting straight out of the graveyard on an
@@ -914,7 +923,7 @@ function renderHand(human) {
     const div = document.createElement('div');
     div.className = 'card hand-card';
     const inMulliganBottom = game.pendingRequest?.type === 'mulliganBottom';
-    if (!inMulliganBottom && !isHandCardPlayable(card)) div.classList.add('uncastable');
+    if (!inMulliganBottom && !isHandCardPlayable(card) && !game.canCycle(HUMAN_ID, card.instanceId)) div.classList.add('uncastable');
     if (ui.targeting && ui.targeting.card.instanceId === card.instanceId) div.classList.add('selected');
     if (inMulliganBottom && ui.mulliganBottomSelection.has(card.instanceId)) div.classList.add('selected');
     div.appendChild(cardVisual(card));
@@ -1095,6 +1104,13 @@ function renderActionBar() {
     return;
   }
 
+  if (game.pendingRequest?.type === 'choice' && game.pendingRequest.playerId === HUMAN_ID) {
+    game.pendingRequest.labels.forEach((label, i) => {
+      buttons.appendChild(makeButton(label, 'primary', () => game.makeChoice(HUMAN_ID, i)));
+    });
+    return;
+  }
+
   if (ui.abilityChoice) {
     const { options } = ui.abilityChoice;
     for (const opt of options) {
@@ -1151,7 +1167,7 @@ function renderTargetingBanner() {
   if (watchMode) { banner.hidden = true; return; }
   if (ui.abilityChoice) {
     banner.hidden = false;
-    banner.textContent = `${ui.abilityChoice.perm.card.name} has multiple abilities — pick one below.`;
+    banner.textContent = `${ui.abilityChoice.perm.card.name} — choose what to do below.`;
     return;
   }
   if (ui.equipChoice) {
@@ -1165,6 +1181,11 @@ function renderTargetingBanner() {
     const kind = ui.targeting.kinds[ui.targeting.collected.length];
     const where = kind === 'stackSpell' ? 'a highlighted spell on the stack' : 'a highlighted card or life total';
     banner.textContent = `Choose a target for ${ui.targeting.card.name} (${remaining} remaining) — click ${where}`;
+    return;
+  }
+  if (game.pendingRequest?.type === 'choice' && game.pendingRequest.playerId === HUMAN_ID) {
+    banner.hidden = false;
+    banner.textContent = `${game.pendingRequest.prompt} — choose one below.`;
     return;
   }
   if (game.pendingRequest?.type === 'etbTarget' && game.pendingRequest.playerId === HUMAN_ID) {
@@ -1207,7 +1228,7 @@ function renderTargetingBanner() {
 
 // ---------- interaction handlers ----------
 
-async function handleHandCardClick(card) {
+async function handleHandCardClick(card, { skipCycleChoice = false } = {}) {
   if (game.gameOver || watchMode) return;
   if (ui.abilityChoice || ui.equipChoice) return; // must Cancel or pick first
 
@@ -1242,6 +1263,24 @@ async function handleHandCardClick(card) {
 
   if (game.step === 'declareAttackers' || game.step === 'declareBlockers') return;
 
+  // A card with cycling can be cast/played OR cycled — offer both through
+  // the same choice menu a permanent with several abilities gets. Always a
+  // menu when cycling is available, even if it's the only option right
+  // now: cycling discards the card, so a click should never do it silently.
+  const cycling = game.getCyclingAbility(card);
+  if (!skipCycleChoice && cycling && game.canCycle(HUMAN_ID, card.instanceId)) {
+    const options = [];
+    const canPlayNormally = game.isLand(card) ? game.canPlayLand(HUMAN_ID) : isHandCardPlayable(card);
+    if (canPlayNormally) {
+      options.push({ label: `${game.isLand(card) ? 'Play' : 'Cast'} ${card.name}`, execute: () => handleHandCardClick(card, { skipCycleChoice: true }) });
+    }
+    const verb = cycling.searchType ? `${cycling.searchType[0].toUpperCase()}${cycling.searchType.slice(1)}cycling` : 'Cycle';
+    options.push({ label: `${verb} ${cycling.manaCost}`, execute: () => game.cycle(HUMAN_ID, card.instanceId) });
+    ui.abilityChoice = { perm: { card }, options };
+    render();
+    return;
+  }
+
   if (game.isLand(card)) {
     if (game.canPlayLand(HUMAN_ID)) game.playLand(HUMAN_ID, card.instanceId);
     return;
@@ -1273,14 +1312,19 @@ async function handleHandCardClick(card) {
     xValue = Math.max(0, Math.min(maxX, parseInt(input, 10) || 0));
   }
 
-  // Kicker (Territorial Allosaurus, ...) is a wholly optional additional
-  // cost — ask, and only pay it if the player says yes AND can actually
-  // afford the combined cost (castSpell itself refuses the cast rather
-  // than silently falling back to unkicked if they can't).
+  // Kicker (Territorial Allosaurus, ...) and Buyback (Capsize, ...) are
+  // wholly optional additional costs — ask, and only pay if the player
+  // says yes AND can actually afford the combined cost (castSpell itself
+  // refuses the cast rather than silently falling back to not paying it).
+  // Only offered when the combined cost is affordable at all, so a "yes"
+  // can't turn a castable spell into a failed cast.
   let kicked = false;
   const kickerCost = game.getKickerCost(card);
+  const buybackCost = game.getBuybackCost(card);
   if (kickerCost) {
     kicked = await showConfirm(`${card.name} has Kicker ${kickerCost}. Pay the Kicker cost?`);
+  } else if (buybackCost && game.canAffordKicked(HUMAN_ID, card)) {
+    kicked = await showConfirm(`${card.name} has Buyback ${buybackCost}. Pay it to return the card to your hand as it resolves?`);
   }
 
   if (kinds.length === 0) {
@@ -1425,6 +1469,7 @@ function handleTargetPick(target) {
       if (t.source === 'ability') game.activateTapAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected, { chosenColor: t.chosenColor });
       else if (t.source === 'nonTapAbility') game.activateNonTapAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
       else if (t.source === 'loyaltyAbility') game.activateLoyaltyAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
+      else if (t.source === 'graveyardAbility') game.activateGraveyardAbility(HUMAN_ID, t.cardInstanceId, t.collected);
       else if (t.source === 'commander') game.castCommander(HUMAN_ID, t.collected, t.xValue || 0);
       else if (t.fromExile) game.playCardFromExile(HUMAN_ID, t.fromExile, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null });
       else if (t.fromGraveyard) game.castFromGraveyard(HUMAN_ID, t.fromGraveyard.cardInstanceId, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null, viaEscape: t.fromGraveyard.viaEscape });

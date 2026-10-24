@@ -2973,6 +2973,41 @@ export function interpretEquipCost(card) {
   return null;
 }
 
+// Oracle text split into lines for the activated-ability parsers below,
+// which split each line at its first colon into "cost: effect". Reminder
+// text has to be dealt with first: a keyword whose reminder restates its
+// own activation ("Cycling {2}{G} ({2}{G}, Discard this card: Draw a
+// card.)") puts that first colon INSIDE the parentheses, which used to
+// produce a bogus battlefield ability with the cost counted twice — Krosan
+// Tusker could pay {2}{G}{2}{G} to draw a card from the battlefield over
+// and over. So a parenthetical is stripped from any line with real text
+// outside it, but a line that is ENTIRELY a parenthetical is unwrapped
+// instead: that's how a land's intrinsic mana ability is printed
+// ("({T}: Add {R} or {W}.)" on Sacred Foundry, "({T}: Add {R}.)" on a
+// basic Mountain), and it's the only mana ability those lands have.
+//
+// Keyword abilities that are really just shorthand for an activated
+// ability are rewritten into their full equivalent text here, so they go
+// through exactly the same cost/effect machinery as a printed ability:
+// "Outlast {1}{W}" becomes "{1}{W}, {T}: Put a +1/+1 counter on this
+// creature. Activate only as a sorcery."
+function activatedAbilityLines(card) {
+  return (card.oracleText || '').split('\n').map(s => s.trim()).filter(Boolean).map(line => {
+    const whole = line.match(/^\((.*)\)$/);
+    if (whole) return whole[1].trim();
+    const stripped = line.replace(/\s*\([^()]*\)/g, '').trim();
+    const outlast = stripped.match(/^outlast ((?:\{[^}]+\})+)$/i);
+    if (outlast) return `${outlast[1]}, {T}: Put a +1/+1 counter on this creature. Activate only as a sorcery.`;
+    return stripped;
+  });
+}
+
+// "Activate only as a sorcery." on the same line as an ability — Outlast's
+// expansion above, and any printed tap ability with the same restriction.
+function isSorcerySpeedOnlyLine(line) {
+  return /activate (?:this ability )?only as a sorcery/i.test(line);
+}
+
 // Scans a permanent's oracle text for any activated ability whose cost
 // includes {T} — "{T}: EFFECT", "{T}, Sacrifice ~:", a fetchland's "{T}, Pay
 // 1 life, Sacrifice ~:", or a mana cost listed BEFORE the tap symbol like
@@ -2983,7 +3018,7 @@ export function interpretEquipCost(card) {
 // symbol never becomes a silently-free cost — see activateTapAbility for
 // where sacrifice/life-payment/mana are all actually charged.
 export function interpretTapAbilities(card) {
-  const lines = (card.oracleText || '').split('\n').map(s => s.trim()).filter(Boolean);
+  const lines = activatedAbilityLines(card);
   const abilities = [];
   for (const line of lines) {
     const m = line.match(/^([^:]+):\s*(.+)$/);
@@ -2998,7 +3033,7 @@ export function interpretTapAbilities(card) {
     const manaCost = bracketed.filter(sym => sym.toUpperCase() !== '{T}' && isPayableManaSymbol(sym)).join('');
     const effectText = m[2];
     const steps = interpretEffectText(effectText.toLowerCase());
-    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), sacrificeCost, payLife, manaCost });
+    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), sacrificeCost, payLife, manaCost, sorcerySpeedOnly: isSorcerySpeedOnlyLine(line) });
   }
   if (abilities.length === 0 || abilities.every(a => isFullyUnsupported(a.steps))) {
     const aiAbilities = getAITapAbilities(card);
@@ -3039,13 +3074,18 @@ export function interpretLoyaltyAbilities(card) {
 // "sacrifice" cost needs a creature actually chosen and sacrificed rather
 // than just a tapped flag flipped — see game.js's activateNonTapAbility.
 export function interpretNonTapAbilities(card) {
-  const lines = (card.oracleText || '').split('\n').map(s => s.trim()).filter(Boolean);
+  const lines = activatedAbilityLines(card);
   const abilities = [];
   for (const line of lines) {
     const m = line.match(/^([^:]+):\s*(.+)$/);
     if (!m) continue;
     const costText = m[1].trim();
     if (/\{T\}/i.test(costText)) continue; // interpretTapAbilities' territory
+    // A graveyard-zone ability (Reassembling Skeleton's "{1}{B}: Return this
+    // card from your graveyard to the battlefield tapped.") — that's
+    // interpretGraveyardAbilities' territory; on the battlefield it would be
+    // a meaningless option in the click menu.
+    if (/from your graveyard/i.test(m[2])) continue;
     // Every {...} symbol actually extracted as a mana cost must be
     // something the mana system can charge (a number, X, C, a color pip,
     // or hybrid) — NOT e.g. a bare "{E}" (energy). parseManaCost silently
@@ -3090,9 +3130,29 @@ export function interpretNonTapAbilities(card) {
 // battlefield already never reaches this (its graveyard copy is a distinct
 // object).
 export function interpretGraveyardAbilities(card) {
-  const lines = (card.oracleText || '').split('\n').map(s => s.trim()).filter(Boolean);
+  const lines = activatedAbilityLines(card);
   const abilities = [];
   for (const line of lines) {
+    // "Unearth {B}" — the same "return this card from your graveyard to the
+    // battlefield" action as below, plus haste and a self-exile at the next
+    // end step (or the moment it would leave the battlefield any other
+    // way); `unearth: true` is what game.js keys those extras off. Always
+    // sorcery-speed, per the keyword's own rules.
+    const unearth = line.match(/^unearth ((?:\{[^}]+\})+)$/i);
+    if (unearth) {
+      const manaCost = (unearth[1].match(/\{[^}]+\}/g) || []).filter(isPayableManaSymbol).join('');
+      if (manaCost) abilities.push({ manaCost, tapped: false, sorcerySpeedOnly: true, unearth: true });
+      continue;
+    }
+    // "Scavenge {3}{B}{G}" — exile this card from your graveyard as part of
+    // the cost: put +1/+1 counters equal to its power on target creature.
+    // Sorcery-speed. The only graveyard ability shape here with a target.
+    const scavenge = line.match(/^scavenge ((?:\{[^}]+\})+)$/i);
+    if (scavenge) {
+      const manaCost = (scavenge[1].match(/\{[^}]+\}/g) || []).filter(isPayableManaSymbol).join('');
+      if (manaCost) abilities.push({ manaCost, sorcerySpeedOnly: true, scavenge: true, targetKinds: ['creature'] });
+      continue;
+    }
     const m = line.match(/^([^:]+):\s*return this card from your graveyard to the battlefield( tapped)?\.?$/i);
     if (!m) continue;
     const costText = m[1].trim();
@@ -3558,6 +3618,42 @@ export function getKickerCost(card) {
   return m ? m[1] : null;
 }
 
+// "Cycling {2}{G}" — activated from the HAND: pay the cost, discard this
+// card, draw a card. "[Type]cycling {cost}" (Plainscycling, Basic
+// landcycling, Slivercycling, ...) searches the library for a card of that
+// type instead of drawing. Returns { manaCost, searchType } (searchType null
+// for plain cycling), or null. Only the first cycling line counts — a card
+// with two (Valley Rannet's Mountaincycling and Forestcycling) gets the
+// first one.
+export function getCyclingAbility(card) {
+  const m = (card.oracleText || '').match(/^([a-z ]*?)cycling\s+((?:\{[^}]+\})+)/im);
+  if (!m) return null;
+  const manaCost = (m[2].match(/\{[^}]+\}/g) || []).filter(isPayableManaSymbol).join('');
+  if (!manaCost) return null;
+  return { manaCost, searchType: m[1].trim().toLowerCase() || null };
+}
+
+// "When you cycle this card, EFFECT" (Krosan Tusker, the Decree cycle) —
+// resolves before the cycling draw itself, as real rules order them (the
+// trigger goes on the stack above the cycling ability).
+export function interpretCycleTriggers(card) {
+  const lines = replaceSelfName(card, card.oracleText || '', 'this card').toLowerCase().split('\n').map(s => s.trim());
+  const steps = [];
+  for (const line of lines) {
+    const m = line.match(/^when(?:ever)? you cycle this card,?\s*(.+)$/);
+    if (m) steps.push(...interpretEffectText(m[1]));
+  }
+  return steps;
+}
+
+// "Buyback {3}" — an optional additional cost like Kicker (same payment
+// plumbing in game.js's castSpell), whose payoff is the card returning to
+// its owner's hand as it resolves instead of going to the graveyard.
+export function getBuybackCost(card) {
+  const m = (card.oracleText || '').match(/^buyback\s+((?:\{[^}]+\})+)/im);
+  return m ? m[1] : null;
+}
+
 // "Flashback {2}{R}" — an alternative cost to cast this card from the
 // GRAVEYARD instead of the hand (see game.js's castFromGraveyard). Returns
 // the flashback cost string, or null if the card has no Flashback at all.
@@ -3599,10 +3695,28 @@ export function getEscapeCost(card) {
 // counters in place to survive at all if X > 0). Returns { isX: true } or
 // { amount: N }, or null if the card has no such line.
 export function getEntersWithCounterCount(card) {
-  const m = (card.oracleText || '').match(/this creature enters with (x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+) \+1\/\+1 counters? on it/i);
+  // Reminder text stripped first: Bloodthirst's own reminder ("...this
+  // creature enters with a +1/+1 counter on it.") would otherwise read as
+  // an UNCONDITIONAL enters-with clause on every Bloodthirst creature.
+  const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+  const m = text.match(/this creature enters with (x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+) \+1\/\+1 counters? on it/i);
   if (!m) return null;
   const token = m[1].toLowerCase();
   return token === 'x' ? { isX: true } : { amount: parseAmount(token) };
+}
+
+// "Bloodthirst N" — enters with N +1/+1 counters if an opponent was dealt
+// damage this turn. Same "enters with" replacement shape as above, but
+// conditional, so game.js checks the condition itself. Returns N or 0.
+export function getBloodthirstAmount(card) {
+  const m = (card.oracleText || '').match(/^bloodthirst (\d+)/im);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+// "Fabricate N" — see game.js's triggerFabricate. Returns N or 0.
+export function getFabricateAmount(card) {
+  const m = (card.oracleText || '').match(/^fabricate (\d+)/im);
+  return m ? parseInt(m[1], 10) : 0;
 }
 
 export function getWardCost(card) {
