@@ -601,6 +601,14 @@ function renderPlayerBar(container, player, isOpponent) {
     container.appendChild(pool);
   }
 
+  // Suspended cards are public information: name and time counters left.
+  if ((player.suspended || []).length > 0) {
+    const susp = document.createElement('span');
+    susp.className = 'stat';
+    susp.textContent = 'Suspended: ' + player.suspended.map(e => `${e.card.name} (${e.timeCounters})`).join(', ');
+    container.appendChild(susp);
+  }
+
   if (game.commanderMode && player.commanderDamageTaken > 0) {
     const cmdDmg = document.createElement('span');
     cmdDmg.className = 'commander-damage';
@@ -923,7 +931,7 @@ function renderHand(human) {
     const div = document.createElement('div');
     div.className = 'card hand-card';
     const inMulliganBottom = game.pendingRequest?.type === 'mulliganBottom';
-    if (!inMulliganBottom && !isHandCardPlayable(card) && !game.canCycle(HUMAN_ID, card.instanceId)) div.classList.add('uncastable');
+    if (!inMulliganBottom && !isHandCardPlayable(card) && handCardAlternatives(card).length === 0) div.classList.add('uncastable');
     if (ui.targeting && ui.targeting.card.instanceId === card.instanceId) div.classList.add('selected');
     if (inMulliganBottom && ui.mulliganBottomSelection.has(card.instanceId)) div.classList.add('selected');
     div.appendChild(cardVisual(card));
@@ -1029,7 +1037,8 @@ function renderStack() {
 
 function isLegalStackTarget(item) {
   if (currentTargetKind() !== 'stackSpell') return false;
-  return !item.isPermanentSpell && !item.isAura;
+  const source = ui.targeting?.card;
+  return source ? game.canCounterTarget(item, source) : item.controllerId !== HUMAN_ID;
 }
 
 function renderActionBar() {
@@ -1228,6 +1237,25 @@ function renderTargetingBanner() {
 
 // ---------- interaction handlers ----------
 
+// Ways to use a hand card other than casting/playing it, currently usable.
+function handCardAlternatives(card) {
+  const options = [];
+  const cycling = game.getCyclingAbility(card);
+  if (cycling && game.canCycle(HUMAN_ID, card.instanceId)) {
+    const verb = cycling.searchType ? `${cycling.searchType[0].toUpperCase()}${cycling.searchType.slice(1)}cycling` : 'Cycle';
+    options.push({ label: `${verb} ${cycling.manaCost}`, execute: () => game.cycle(HUMAN_ID, card.instanceId) });
+  }
+  const suspend = game.getSuspendInfo(card);
+  if (suspend && game.canSuspend(HUMAN_ID, card.instanceId)) {
+    options.push({ label: `Suspend ${suspend.time} — ${suspend.manaCost}`, execute: () => game.suspend(HUMAN_ID, card.instanceId) });
+  }
+  const transmute = game.getTransmuteCost(card);
+  if (transmute && game.canTransmute(HUMAN_ID, card.instanceId)) {
+    options.push({ label: `Transmute ${transmute}`, execute: () => game.transmute(HUMAN_ID, card.instanceId) });
+  }
+  return options;
+}
+
 async function handleHandCardClick(card, { skipCycleChoice = false } = {}) {
   if (game.gameOver || watchMode) return;
   if (ui.abilityChoice || ui.equipChoice) return; // must Cancel or pick first
@@ -1263,19 +1291,20 @@ async function handleHandCardClick(card, { skipCycleChoice = false } = {}) {
 
   if (game.step === 'declareAttackers' || game.step === 'declareBlockers') return;
 
-  // A card with cycling can be cast/played OR cycled — offer both through
-  // the same choice menu a permanent with several abilities gets. Always a
-  // menu when cycling is available, even if it's the only option right
-  // now: cycling discards the card, so a click should never do it silently.
-  const cycling = game.getCyclingAbility(card);
-  if (!skipCycleChoice && cycling && game.canCycle(HUMAN_ID, card.instanceId)) {
+  // A card that can be cast/played OR used another way from hand —
+  // Cycling, Suspend, Transmute — offers every option through the same
+  // choice menu a permanent with several abilities gets. Always a menu
+  // when any alternative is available, even if it's the only option right
+  // now: each of these discards or exiles the card, so a click should
+  // never do one silently.
+  const alternatives = skipCycleChoice ? [] : handCardAlternatives(card);
+  if (alternatives.length > 0) {
     const options = [];
     const canPlayNormally = game.isLand(card) ? game.canPlayLand(HUMAN_ID) : isHandCardPlayable(card);
     if (canPlayNormally) {
       options.push({ label: `${game.isLand(card) ? 'Play' : 'Cast'} ${card.name}`, execute: () => handleHandCardClick(card, { skipCycleChoice: true }) });
     }
-    const verb = cycling.searchType ? `${cycling.searchType[0].toUpperCase()}${cycling.searchType.slice(1)}cycling` : 'Cycle';
-    options.push({ label: `${verb} ${cycling.manaCost}`, execute: () => game.cycle(HUMAN_ID, card.instanceId) });
+    options.push(...alternatives);
     ui.abilityChoice = { perm: { card }, options };
     render();
     return;
@@ -1290,7 +1319,15 @@ async function handleHandCardClick(card, { skipCycleChoice = false } = {}) {
 
   const modal = game.getSpellModes(card);
   let modeIndexes = null;
-  if (modal) {
+  // Entwine: asked BEFORE modes, since paying it means every mode (and
+  // therefore every mode's targets) — only offered when affordable.
+  let entwined = false;
+  const entwineCost = modal && game.getEntwineCost(card);
+  if (entwineCost && game.canAffordKicked(HUMAN_ID, card)) {
+    entwined = await showConfirm(`${card.name} has Entwine ${entwineCost}. Pay it to choose all modes?`);
+    if (entwined) modeIndexes = modal.modes.map((_, i) => i);
+  }
+  if (modal && !entwined) {
     modeIndexes = await chooseModes(card, modal);
     if (modeIndexes === null) return; // cancelled
   }
@@ -1318,7 +1355,7 @@ async function handleHandCardClick(card, { skipCycleChoice = false } = {}) {
   // refuses the cast rather than silently falling back to not paying it).
   // Only offered when the combined cost is affordable at all, so a "yes"
   // can't turn a castable spell into a failed cast.
-  let kicked = false;
+  let kicked = entwined;
   const kickerCost = game.getKickerCost(card);
   const buybackCost = game.getBuybackCost(card);
   if (kickerCost) {
@@ -1406,7 +1443,12 @@ function currentTargetKind() {
 function isLegalPermanentTarget(perm) {
   const kind = currentTargetKind();
   if (!kind) return false;
-  if (!game.canBeTargetedBy(perm, HUMAN_ID)) return false;
+  // The source card doing the targeting, for Protection: a spell/ability
+  // being set up through ui.targeting, or the permanent whose ETB trigger
+  // is asking.
+  const sourceCard = ui.targeting?.card
+    || (game.pendingRequest?.type === 'etbTarget' ? game.findPermanent(game.pendingRequest.sourcePermId)?.card : null);
+  if (!game.canBeTargetedBy(perm, HUMAN_ID, sourceCard)) return false;
   // A multi-target request ("up to two target creatures") shows up as
   // several consecutive same-kind slots (see game.js's expandTargetKinds) —
   // without this, nothing stops the same permanent from being picked for
@@ -1421,7 +1463,7 @@ function isLegalPermanentTarget(perm) {
   // "Any target"/"creature or player" (see effects.js's describeTargetKind)
   // includes planeswalkers in real modern rules text.
   if (kind === 'creatureOrPlayer') return isCreature || game.isPlaneswalker(perm.card);
-  if (kind === 'planeswalker') return game.isPlaneswalker(perm.card);
+  if (kind === 'planeswalker' || kind === 'playerOrPlaneswalker') return game.isPlaneswalker(perm.card);
   if (kind === 'permanent') return true;
   return false;
 }
@@ -1456,7 +1498,7 @@ function isLegalCombatTarget(perm) {
 
 function isTargetablePlayer(playerId) {
   const kind = currentTargetKind();
-  return kind === 'player' || kind === 'creatureOrPlayer';
+  return kind === 'player' || kind === 'creatureOrPlayer' || kind === 'playerOrPlaneswalker';
 }
 
 function handleTargetPick(target) {
@@ -1667,6 +1709,11 @@ function handlePermanentClick(perm, isOpponentPermanent) {
     } else {
       // assigning the armed blocker to this attacker
       if (!perm.attacking || !ui.armedBlocker) return;
+      const armed = game.findPermanent(ui.armedBlocker);
+      if (!game.canBlockAttacker(armed, perm)) {
+        showErrorToast(`${armed?.card.name} can't block ${perm.card.name} (evasion such as flying, fear, or landwalk, or protection).`, "Can't block");
+        return;
+      }
       ui.blockMap = ui.blockMap.filter(b => b.blockerId !== ui.armedBlocker);
       ui.blockMap.push({ blockerId: ui.armedBlocker, attackerId: perm.id });
       ui.armedBlocker = null;

@@ -809,7 +809,7 @@ function interpretEffectText(text) {
     // the restriction itself (same simplification as elsewhere: any legal
     // stack target can be chosen), but recognizing the pattern at all is
     // what matters here.
-    if ((m = clause.match(/counter target (?:\w+ )?spell/))) {
+    if ((m = clause.match(/counter target (?:[\w\s,-]+? )?spell/))) {
       steps.push({
         kind: 'counter',
         targeting: 'stackSpell',
@@ -2202,6 +2202,27 @@ function interpretEffectText(text) {
     // "target" at all, a self-selected choice; see
     // applyBounceOwnPermanentEffect for the cheapest-first auto-pick, and
     // why only the land case excludes the source itself.
+    // "Put all creatures on the bottom of their owners' libraries" (Terminus,
+    // Hallowed Burial) and "Put target [attacking] creature on the bottom of
+    // its owner's library" (Condemn, Spin into Myth's "on top of" is a
+    // different shape) — a "tuck": it leaves the battlefield without dying.
+    if (/^put all creatures on the bottom of their owners'? libraries$/.test(clause)) {
+      steps.push({ kind: 'tuck', targeting: 'none', resolve: (game, ctx) => game.applyTuckEffect(ctx, { allCreatures: true }) });
+      continue;
+    }
+    // Condemn's follow-up: "Its controller gains life equal to its
+    // toughness." — the tucked creature is already gone by now, so this
+    // reads what applyTuckEffect remembered about it.
+    if (/^its controller gains life equal to its toughness$/.test(clause)) {
+      steps.push({ kind: 'lifegain', targeting: 'none', resolve: (game) => game.applyLastTuckedLifegain() });
+      continue;
+    }
+    if ((m = clause.match(/^put target ([\w\s]+?) on the bottom of its owner'?s library$/))) {
+      const isCreatureTarget = /creature/.test(m[1]);
+      steps.push({ kind: 'tuck', targeting: isCreatureTarget ? 'creature' : 'permanent', resolve: (game, ctx) => game.applyTuckEffect(ctx) });
+      continue;
+    }
+
     if ((m = clause.match(/^return an? (creature|land|artifact|permanent) you control to its owner'?s hand$/))) {
       const typeWord = m[1];
       steps.push({
@@ -3213,6 +3234,18 @@ export function interpretCastTriggers(card) {
 const SPELL_FILTER_COLORS = { white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G' };
 const SPELL_FILTER_KNOWN_TYPES = ['aura', 'equipment', 'vehicle', 'artifact', 'creature', 'enchantment', 'instant', 'sorcery'];
 
+// A counterspell's own restriction on what it can counter — "counter
+// target spell" (null: anything), "counter target noncreature spell"
+// (Negate), "counter target instant or sorcery spell" (Muddle the
+// Mixture), "counter target creature spell" (Essence Scatter) — as a
+// spellMatchesFilter filter. undefined if this card isn't a counterspell.
+export function getCounterSpellFilter(card) {
+  const text = (card.oracleText || '').toLowerCase().replace(/\([^()]*\)/g, '');
+  const m = text.match(/counter target (?:([\w\s,-]+?) )?spell/);
+  if (!m) return undefined;
+  return describeSpellFilter(m[1] ? m[1].trim() : null);
+}
+
 function describeSpellFilter(text) {
   if (!text) return null; // any spell
   // A comma/"or"-separated multi-type list (Sram, Senior Edificer's "an
@@ -3633,6 +3666,37 @@ export function getCyclingAbility(card) {
   return { manaCost, searchType: m[1].trim().toLowerCase() || null };
 }
 
+// "Suspend 4—{U}" — returns { time, manaCost } or null. (An X-time suspend
+// like "Suspend X—{X}{X}{R}" isn't handled.)
+export function getSuspendInfo(card) {
+  const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+  const m = text.match(/^suspend (\d+)\s*[—-]\s*((?:\{[^}]+\})+)/im);
+  if (!m) return null;
+  const manaCost = (m[2].match(/\{[^}]+\}/g) || []).filter(isPayableManaSymbol).join('');
+  return { time: parseInt(m[1], 10), manaCost };
+}
+
+// "Miracle {W}" — the cost string, or null.
+export function getMiracleCost(card) {
+  const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+  const m = text.match(/^miracle ((?:\{[^}]+\})+)/im);
+  return m ? m[1] : null;
+}
+
+// "Transmute {1}{U}{U}" — the cost string, or null.
+export function getTransmuteCost(card) {
+  const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+  const m = text.match(/^transmute ((?:\{[^}]+\})+)/im);
+  return m ? m[1] : null;
+}
+
+// "Entwine {2}" — the cost string, or null.
+export function getEntwineCost(card) {
+  const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+  const m = text.match(/^entwine ((?:\{[^}]+\})+)/im);
+  return m ? m[1] : null;
+}
+
 // "When you cycle this card, EFFECT" (Krosan Tusker, the Decree cycle) —
 // resolves before the cycling draw itself, as real rules order them (the
 // trigger goes on the stack above the cycling ability).
@@ -3995,6 +4059,11 @@ function describeTargetKind(phrase) {
   const typeKeywords = ['artifact', 'creature', 'enchantment', 'land', 'planeswalker'];
   if (typeKeywords.filter(t => phrase.includes(t)).length > 1) return 'permanent';
   if (phrase.includes('creature')) return 'creature';
+  // "Target player or planeswalker" / "target opponent or planeswalker"
+  // (Lava Spike, Boros Charm, Bonfire of the Damned) — used to fall into
+  // the bare-planeswalker case just below, so these spells could ONLY hit
+  // a planeswalker and were uncastable against a player.
+  if (/(?:player|opponent) or planeswalker/.test(phrase)) return 'playerOrPlaneswalker';
   // Bare "target planeswalker" (Bedevil-style compounds are already caught
   // above) — previously fell through to the 'creatureOrPlayer' default,
   // which wrongly let it hit a plain creature too.

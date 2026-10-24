@@ -96,21 +96,34 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
   const usedIds = new Set();
   if (excludeId) usedIds.add(excludeId);
   for (const kind of kinds) {
-    if (kind === 'player' ) { targets.push({ type: 'player', id: opponent.id }); continue; }
+    if (kind === 'player') {
+      // "Target player draws three cards" (Ancestral Vision) or "target
+      // player draws two cards and loses 2 life" (Sign in Blood) helps
+      // whoever it targets — point it at ourselves, unless the attached
+      // life loss would finish off the opponent. Everything else (discard,
+      // mill, damage, plain life loss) goes at the opponent. This used to
+      // always pick the opponent, handing them the cards.
+      const text = (card.oracleText || '').toLowerCase();
+      const helps = /target player[^.]*\b(?:draws?|gains?)\b/.test(text);
+      const loss = text.match(/loses? (\d+) life/);
+      const lethal = loss && opponent.life <= parseInt(loss[1], 10);
+      targets.push({ type: 'player', id: helps && !lethal ? controllerId : opponent.id });
+      continue;
+    }
     if (kind === 'creatureOrPlayer' || kind === 'creature') {
       // "Fights" (Fight — Territorial Allosaurus, Prey Upon, ...) is
       // removal-shaped for targeting purposes even though it neither deals
       // damage nor destroys directly: the whole point is to pick the best
       // enemy creature to trade into, same as burn/destroy.
       const isRemoval = /deal|destroy|-\d+\/-\d+|fights?\b/i.test(card.oracleText || '');
-      const enemyCreatures = opponent.battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId) && !usedIds.has(p.id));
+      const enemyCreatures = opponent.battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
       // "Any target"/"creature or player" (kind 'creatureOrPlayer' only —
       // bare 'creature' never includes them) can legally hit a planeswalker
       // in real rules text too. Worth considering for removal/damage:
       // finishing off a low-loyalty planeswalker is often the best use of
       // a burn spell, so ties are broken toward whichever's lowest loyalty.
       const enemyPlaneswalkers = kind === 'creatureOrPlayer'
-        ? opponent.battlefield.filter(p => game.isPlaneswalker(p.card) && game.canBeTargetedBy(p, controllerId) && !usedIds.has(p.id))
+        ? opponent.battlefield.filter(p => game.isPlaneswalker(p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id))
         : [];
       if (isRemoval && (enemyCreatures.length > 0 || enemyPlaneswalkers.length > 0)) {
         const bestCreature = enemyCreatures.length > 0 ? enemyCreatures.sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0] : null;
@@ -121,14 +134,26 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
       } else if (kind === 'creatureOrPlayer' && enemyCreatures.length === 0 && enemyPlaneswalkers.length === 0) {
         targets.push({ type: 'player', id: opponent.id });
       } else {
-        const own = game.getPlayer(controllerId).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId) && !usedIds.has(p.id));
+        const own = game.getPlayer(controllerId).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
         if (own.length > 0) { targets.push({ type: 'permanent', id: own[0].id }); usedIds.add(own[0].id); }
-        else targets.push({ type: 'player', id: opponent.id });
+        // Bare "target creature" with no creature anywhere: no legal target
+        // (this used to fall back to targeting the opponent PLAYER).
+        else targets.push(kind === 'creature' ? null : { type: 'player', id: opponent.id });
       }
       continue;
     }
+    // "Target player or planeswalker": the opponent, unless one of their
+    // planeswalkers is low enough on loyalty to be worth finishing off.
+    if (kind === 'playerOrPlaneswalker') {
+      const weakPw = opponent.battlefield
+        .filter(p => game.isPlaneswalker(p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id) && (p.counters.loyalty || 0) <= 3)
+        .sort((a, b) => (a.counters.loyalty || 0) - (b.counters.loyalty || 0))[0];
+      if (weakPw) { targets.push({ type: 'permanent', id: weakPw.id }); usedIds.add(weakPw.id); }
+      else targets.push({ type: 'player', id: opponent.id });
+      continue;
+    }
     if (kind === 'planeswalker') {
-      const enemyPlaneswalkers = opponent.battlefield.filter(p => game.isPlaneswalker(p.card) && game.canBeTargetedBy(p, controllerId) && !usedIds.has(p.id));
+      const enemyPlaneswalkers = opponent.battlefield.filter(p => game.isPlaneswalker(p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
       if (enemyPlaneswalkers.length > 0) {
         const chosen = enemyPlaneswalkers.sort((a, b) => (a.counters.loyalty || 0) - (b.counters.loyalty || 0))[0];
         targets.push({ type: 'permanent', id: chosen.id });
@@ -140,7 +165,7 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
     }
     if (kind === 'permanent') {
       const preferOpponent = wantsOpponentPermanent(game, card);
-      const primaryPool = (preferOpponent ? opponent : game.getPlayer(controllerId)).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId) && !usedIds.has(p.id));
+      const primaryPool = (preferOpponent ? opponent : game.getPlayer(controllerId)).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
       if (primaryPool.length > 0) {
         const chosen = primaryPool.sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0];
         targets.push({ type: 'permanent', id: chosen.id });
@@ -149,17 +174,19 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
         // No legal creature in the preferred pool (e.g. a removal aura but
         // the opponent has no creatures yet) — fall back to the other side
         // rather than skip a castable spell entirely.
-        const fallbackPool = (preferOpponent ? game.getPlayer(controllerId) : opponent).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId) && !usedIds.has(p.id));
+        const fallbackPool = (preferOpponent ? game.getPlayer(controllerId) : opponent).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
         if (fallbackPool.length > 0) { targets.push({ type: 'permanent', id: fallbackPool[0].id }); usedIds.add(fallbackPool[0].id); }
         else targets.push(null);
       }
       continue;
     }
     if (kind === 'stackSpell') {
+      // The topmost OPPONENT's spell this counterspell can legally counter
+      // (any spell type — permanents included — subject to its own filter).
       let top = null;
       for (let i = game.stack.length - 1; i >= 0; i--) {
         const s = game.stack[i];
-        if (!s.isPermanentSpell && !s.isAura) { top = s; break; }
+        if (s.controllerId !== controllerId && game.canCounterTarget(s, card)) { top = s; break; }
       }
       targets.push(top ? { type: 'stack', id: top.id } : null);
       continue;
@@ -268,6 +295,18 @@ export function takeAITurnAction(game) {
       }
     }
 
+    // Suspend: always for a card that can't be cast any other way
+    // (Ancestral Vision), otherwise when the normal cost isn't affordable
+    // yet but the suspend cost is, or when a short suspend is much cheaper
+    // (Rift Bolt's suspend 1 for {R} instead of {2}{R}).
+    for (const card of p.hand) {
+      const info = game.getSuspendInfo(card);
+      if (!info || !game.canSuspend(p.id, card.instanceId)) continue;
+      const suspendCmc = totalCmc(parseManaCost(info.manaCost));
+      const worthIt = !card.manaCost || !game.affordability(p.id, card) || (info.time <= 1 && suspendCmc < (card.cmc || 0));
+      if (worthIt) { game.suspend(p.id, card.instanceId); return; }
+    }
+
     const playable = p.hand
       .filter(c => !isLand(game, c) && game.canCastSpell(p.id, c) && game.affordability(p.id, c))
       .sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
@@ -279,7 +318,17 @@ export function takeAITurnAction(game) {
       if (game.step === 'main1' && getBloodthirstAmount(card) > 0 && game.opponentOf(p.id).damageTakenThisTurn === 0) continue;
       const modal = game.getSpellModes(card);
       let modeIndexes = null;
-      if (modal) {
+      // Entwine: pay the extra cost and get every mode, when it's affordable
+      // and every mode can actually find its targets. Decided before
+      // targets are picked, since entwining changes which targets are needed.
+      let entwine = false;
+      if (modal && game.getEntwineCost(card) && game.canAffordKicked(p.id, card)) {
+        const all = modal.modes.map((_, i) => i);
+        const allKinds = game.getRequiredTargetKinds(card, all);
+        const allTargets = pickTargetsForKinds(game, card, p.id, allKinds).filter(Boolean);
+        if (game.getMinRequiredTargetCount(card, all) <= allTargets.length) { modeIndexes = all; entwine = true; }
+      }
+      if (modal && !entwine) {
         modeIndexes = pickModesFor(game, modal, card, p.id);
         if (!modeIndexes) continue; // no satisfiable combination of modes — skip this card
       }
@@ -309,7 +358,9 @@ export function takeAITurnAction(game) {
       // Opt into Kicker (Territorial Allosaurus, etc.) whenever the extra
       // cost is affordable — a bot that never pays optional costs would
       // never actually exercise the payoff half of a Kicker card.
-      const kicked = game.canAffordKicked(p.id, card);
+      // (An Entwine card's optional cost is entwine itself — only paid when
+      // decided above, never just because it happens to be affordable.)
+      const kicked = game.getEntwineCost(card) ? entwine : game.canAffordKicked(p.id, card);
       const result = game.castSpell(p.id, card.instanceId, targets, xValue, modeIndexes, kicked);
       if (result.ok) return;
     }
@@ -465,7 +516,11 @@ export function takeAITurnAction(game) {
     const instants = p.hand.filter(c => /instant/i.test(c.typeLine) && game.canCastSpell(p.id, c) && game.affordability(p.id, c));
     for (const card of instants) {
       const text = (card.oracleText || '').toLowerCase();
-      const wantsToCounter = text.includes('counter target spell') && game.stack.some(s => s.controllerId !== p.id && !s.isPermanentSpell);
+      // Any counterspell (Counterspell, Negate, Essence Scatter, Muddle the
+      // Mixture, ...) that has a legal opposing spell to counter — this used
+      // to recognize only the exact words "counter target spell", and only
+      // against instants/sorceries.
+      const wantsToCounter = /counter target (?:[\w\s,-]+? )?spell/.test(text) && game.stack.some(s => s.controllerId !== p.id && game.canCounterTarget(s, card));
       // Includes X-based damage ("deals twice X damage to target creature")
       // alongside the plain-digit case — otherwise an X-payoff removal
       // spell like Khaaaaaaaaaaaannn! is never even considered as removal.
@@ -517,10 +572,15 @@ export function aiDeclareAttackers(game) {
     const power = game.effectivePower(perm);
     if (power <= 0) return false;
     const kws = game.effectiveKeywords(perm);
-    if (theirBlockers.length === 0) return true;
-    // Attack if it's evasive, or if trading favorably/we outnumber their blockers.
-    if (kws.has('flying') && !theirBlockers.some(b => game.effectiveKeywords(b).has('flying') || game.effectiveKeywords(b).has('reach'))) return true;
-    const canBeKilledForFree = theirBlockers.some(b => game.effectivePower(b) >= game.effectiveToughness(perm) && game.effectiveToughness(b) > power);
+    // Only creatures that could LEGALLY block this attacker matter — every
+    // evasion rule (flying, fear, intimidate, landwalk, protection) and
+    // tapped blockers come from game.canBlockAttacker, the same check the
+    // engine enforces. No legal blocker at all means it's effectively
+    // unblockable this turn; menace needs two.
+    const legalBlockers = theirBlockers.filter(b => game.canBlockAttacker(b, perm));
+    if (legalBlockers.length === 0) return true;
+    if (kws.has('menace') && legalBlockers.length < 2) return true;
+    const canBeKilledForFree = legalBlockers.some(b => game.effectivePower(b) >= game.effectiveToughness(perm) && game.effectiveToughness(b) > power);
     return !canBeKilledForFree;
   });
 
@@ -558,24 +618,28 @@ export function aiDeclareBlockers(game) {
   const sortedAttackers = attackers.slice().sort((a, b) => game.effectivePower(b) - game.effectivePower(a));
 
   for (const attacker of sortedAttackers) {
-    const kws = game.effectiveKeywords(attacker);
-    const candidate = myBlockers.find(b => {
-      if (used.has(b.id)) return false;
-      const bKws = game.effectiveKeywords(b);
-      if (kws.has('flying') && !bKws.has('flying') && !bKws.has('reach')) return false;
-      const trade = game.effectivePower(b) >= game.effectiveToughness(attacker) || game.effectiveToughness(b) > game.effectivePower(attacker);
-      return trade;
-    });
-    if (candidate) {
-      used.add(candidate.id);
-      blockMap.push({ blockerId: candidate.id, attackerId: attacker.id });
-    } else if (p.life - game.effectivePower(attacker) <= 4) {
-      // chump block if it's needed to survive
-      const chump = myBlockers.find(b => !used.has(b.id));
-      if (chump) {
-        used.add(chump.id);
-        blockMap.push({ blockerId: chump.id, attackerId: attacker.id });
+    // Every per-pair restriction (flying, fear, intimidate, landwalk,
+    // protection) lives in game.canBlockAttacker — including for chump
+    // blocks, which used to skip legality entirely.
+    const legal = myBlockers.filter(b => !used.has(b.id) && game.canBlockAttacker(b, attacker));
+    const mustChump = p.life - game.effectivePower(attacker) <= 4;
+
+    // Menace: two blockers or none at all.
+    if (game.effectiveKeywords(attacker).has('menace')) {
+      if (legal.length < 2) continue;
+      const pair = legal.slice().sort((a, b) => game.effectivePower(b) - game.effectivePower(a)).slice(0, 2);
+      const kills = pair.reduce((s, b) => s + game.effectivePower(b), 0) >= game.effectiveToughness(attacker);
+      if (kills || mustChump) {
+        for (const b of pair) { used.add(b.id); blockMap.push({ blockerId: b.id, attackerId: attacker.id }); }
       }
+      continue;
+    }
+
+    const candidate = legal.find(b => game.effectivePower(b) >= game.effectiveToughness(attacker) || game.effectiveToughness(b) > game.effectivePower(attacker));
+    const chosen = candidate || (mustChump ? legal[0] : null);
+    if (chosen) {
+      used.add(chosen.id);
+      blockMap.push({ blockerId: chosen.id, attackerId: attacker.id });
     }
   }
 

@@ -1,6 +1,7 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
+import { pickTargetsForKinds } from './ai.js';
 
 export const STEP_ORDER = [
   'untap', 'upkeep', 'draw', 'main1',
@@ -148,6 +149,8 @@ const KNOWN_KEYWORDS = [
   'first strike', 'double strike', 'flying', 'reach', 'haste', 'vigilance',
   'trample', 'deathtouch', 'lifelink', 'menace', 'indestructible', 'hexproof',
   'shroud', 'ward', 'defender', 'undying', 'persist',
+  'fear', 'intimidate', 'plainswalk', 'islandwalk', 'swampwalk', 'mountainwalk', 'forestwalk',
+  'exalted', 'decayed', 'mentor', 'training',
 ];
 
 // Finds any recognized keyword abilities named in a chunk of (already
@@ -156,6 +159,54 @@ const KNOWN_KEYWORDS = [
 // commas/"and" means it isn't thrown off by punctuation variations.
 function extractKnownKeywords(text) {
   return KNOWN_KEYWORDS.filter(kw => text.includes(kw));
+}
+
+// One lowercase oracle line parsed as a creature anthem / tribal lord, or
+// null. Covers "Creatures you control get +1/+1", "Creature tokens you
+// control get +1/+1 and have vigilance", "Other Elf creatures you control
+// get +1/+1", "Other non-Human creatures you control have undying", and
+// bare tribal lords with no "you control" at all — "Other Merfolk get
+// +1/+1 and have islandwalk" pumps EVERY player's Merfolk. The type
+// restriction is enforced (anthemAppliesTo), not just tolerated.
+const NON_CREATURE_SUBJECTS = new Set(['artifacts', 'lands', 'enchantments', 'planeswalkers', 'spells', 'permanents', 'tokens', 'players', 'opponents', 'you', 'they', 'it']);
+function parseCreatureAnthemLine(line) {
+  const m = line.match(/^(other )?(.+?)( you control)?( of the chosen type)? (get ([+-]\d+)\/([+-]\d+)(?: and (?:have|has) ([^.]+))?|(?:have|has) ([^.]+))/);
+  if (!m) return null;
+  const core = m[2].trim();
+  let subtype = null, tokenOnly = false;
+  if (core === 'creature tokens') tokenOnly = true;
+  else if (core === 'creatures') { /* every creature */ }
+  else if (/^[a-z-]+ creatures$/.test(core)) subtype = core.replace(/ creatures$/, '');
+  else if (/^[a-z-]+$/.test(core) && !NON_CREATURE_SUBJECTS.has(core)) subtype = core;
+  else return null;
+  const youControl = !!m[3];
+  // "Creatures get +1/+1" with no subtype and no "you control" would be a
+  // global effect worded differently from every anthem this targets.
+  if (!youControl && !subtype) return null;
+  return {
+    other: !!m[1], tokenOnly, subtype, youControl, chosenType: !!m[4],
+    power: m[6] ? parseInt(m[6], 10) : 0,
+    toughness: m[7] ? parseInt(m[7], 10) : 0,
+    grantText: m[8] || m[9] || '',
+  };
+}
+
+// Whether a parsed anthem line from `source` applies to `perm`.
+function anthemAppliesTo(a, source, perm) {
+  if (a.other && source.id === perm.id) return false;
+  if (a.youControl && source.controllerId !== perm.controllerId) return false;
+  const typeLine = (perm.card.typeLine || '').toLowerCase();
+  if (a.tokenOnly && !/\btoken\b/.test(typeLine)) return false;
+  if (a.chosenType && (!source.chosenType || !typeLine.includes(source.chosenType.toLowerCase()))) return false;
+  if (a.subtype) {
+    const negated = a.subtype.startsWith('non-');
+    const word = negated ? a.subtype.slice(4) : a.subtype;
+    const forms = new Set([word, word.replace(/ves$/, 'f'), word.replace(/ies$/, 'y'), word.replace(/s$/, '')]);
+    const subtypes = (typeLine.split('—')[1] || '').split(/\s+/).filter(Boolean);
+    const has = subtypes.some(s => forms.has(s));
+    if (negated ? has : !has) return false;
+  }
+  return true;
 }
 
 let nextId = 1;
@@ -248,6 +299,13 @@ function makePlayer(id, name, deck, isAI, startingLife = 20) {
     // abilities), reset at the start of each of the player's own turns
     // (Simulacrum-style "equal to the damage dealt to you this turn" cards).
     damageTakenThisTurn: 0,
+    // Cards exiled with time counters via Suspend: [{ card, timeCounters }].
+    // One counter comes off each of this player's upkeeps; the last one
+    // casts the card for free (see tickSuspended).
+    suspended: [],
+    // Cards drawn so far this turn — Miracle cares whether a card is the
+    // FIRST one drawn this turn. Reset at the start of every turn.
+    cardsDrawnThisTurn: 0,
     // Emblems (a planeswalker ultimate's "You get an emblem with '...'") —
     // no physical card, so just the raw granted-ability text strings,
     // checked by anthemBonus/effectiveKeywords the same way a permanent's
@@ -487,8 +545,12 @@ export class Game {
     const card = player.library.shift();
     player.hand.push(card);
     if (!silent) {
+      // Silent draws are the opening hand and mulligans — those never count
+      // as "drawn this turn" for Miracle.
+      player.cardsDrawnThisTurn = (player.cardsDrawnThisTurn || 0) + 1;
       this.log(`${player.name} draws a card.`);
       this.triggerDrawCard(player);
+      if (player.cardsDrawnThisTurn === 1) this.offerMiracle(player, card);
     }
   }
 
@@ -1039,12 +1101,13 @@ export class Game {
       // "This turn" is a shared, global concept (only one turn happens at a
       // time) — a new turn beginning resets it for BOTH players, not just
       // whoever's turn it now is.
-      for (const pl of this.players) pl.damageTakenThisTurn = 0;
+      for (const pl of this.players) { pl.damageTakenThisTurn = 0; pl.cardsDrawnThisTurn = 0; }
       this.leftBattlefieldThisTurn = [];
       this.advanceStep();
       return;
     }
     if (step === 'upkeep') {
+      this.tickSuspended();
       this.triggerPhase(interpretUpkeepTriggers);
       this.triggerEnchantedPlayerUpkeep();
       this.openPriorityWindow();
@@ -1094,6 +1157,10 @@ export class Game {
       this.triggerPhase(interpretBeginCombatTriggers);
       this.openPriorityWindow();
       return;
+    }
+    if (step === 'endCombat') {
+      this.sacrificeDecayedAttackers();
+      this.checkStateBasedActions();
     }
     // endCombat, main2: just open priority
     this.openPriorityWindow();
@@ -1476,7 +1543,11 @@ export class Game {
   // amount of GENERIC mana to subtract from the parsed cost; never reduces
   // colored pips, matching how these effects actually work.
   getCastCostReduction(card, controllerId) {
-    const text = (card.oracleText || '').toLowerCase();
+    // Reminder text stripped: Affinity's own reminder ("This spell costs
+    // {1} less to cast for each artifact you control.") used to be what
+    // made Affinity work at all, by accident — the explicit Affinity rule
+    // below is the real handling now, and would double-count otherwise.
+    const text = (card.oracleText || '').toLowerCase().replace(/\([^()]*\)/g, '');
     let selfReduction = 0;
     let m = text.match(/this spell costs \{(\d+)\} less to cast for each ([\w\s]+?)(?: on the battlefield| you control)/);
     if (m) {
@@ -1497,6 +1568,16 @@ export class Game {
         selfReduction = controller.battlefield.filter(p => isCreature(p.card)).reduce((sum, p) => sum + this.effectivePower(p), 0);
       }
     }
+    const plain = text.replace(/\([^()]*\)/g, '');
+    // Affinity for [type]: {1} less for each [type] you control (Frogmite,
+    // Thoughtcast — "affinity for artifacts").
+    const affinity = plain.match(/^affinity for ([a-z ]+?)\s*$/m);
+    if (affinity) {
+      const typeWord = affinity[1].trim().replace(/s$/, '');
+      selfReduction += this.getPlayer(controllerId).battlefield.filter(p => (p.card.typeLine || '').toLowerCase().includes(typeWord)).length;
+    }
+    // Undaunted: {1} less for each opponent — always exactly one here.
+    if (/^undaunted\s*$/m.test(plain)) selfReduction += 1;
     return selfReduction + this.getOtherSourceCostReduction(card, controllerId);
   }
 
@@ -1545,13 +1626,109 @@ export class Game {
     return total;
   }
 
-  affordability(playerId, card) {
+  // Plans paying a spell's (already cost-reduced) parsed cost: untapped
+  // lands and floating mana first, then — only for whatever they can't
+  // cover — the spell's own alternative payment keywords: Delve (exile
+  // graveyard cards, {1} each), Improvise (tap untapped artifacts, {1}
+  // each), Convoke (tap untapped creatures, {1} each or one mana of that
+  // creature's color). Tried in that order, cheapest-to-give-up first, and
+  // only as many as needed — tapping a creature costs you an attacker or
+  // blocker, so it's the last resort. Returns { lands, poolUsed, tapForCost,
+  // exileFromGraveyard } or null.
+  planSpellPayment(playerId, card, parsed, xValue = 0) {
     const p = this.getPlayer(playerId);
+    // A card with no mana cost at all (Ancestral Vision, Living End, Lotus
+    // Bloom) can't be cast normally — only through an alternative cost like
+    // Suspend. Before this it was castable for free.
+    if (!card.manaCost && !isLand(card)) return null;
+    const lands = p.battlefield.filter(perm => isLand(perm.card) && !perm.tapped);
+    const base = planManaPayment(lands, parsed, xValue, p.manaPool);
+    if (base) return { ...base, tapForCost: [], exileFromGraveyard: [], lifePaid: 0, phyrexianPaidWithLife: 0 };
+    // Phyrexian mana ({U/P}, {G/W/P}): each symbol may be paid with 2 life
+    // instead. Mana is preferred; life covers only the symbols mana can't,
+    // and never so much that paying would put the player at 0 or less.
+    const phyrexianIdx = parsed.hybrid.map((h, i) => (h.includes('P') ? i : -1)).filter(i => i >= 0);
+    for (let k = 1; k <= phyrexianIdx.length && 2 * k < p.life; k++) {
+      const drop = new Set(phyrexianIdx.slice(0, k));
+      const plan = planManaPayment(lands, { ...parsed, hybrid: parsed.hybrid.filter((_, i) => !drop.has(i)) }, xValue, p.manaPool);
+      if (plan) return { ...plan, tapForCost: [], exileFromGraveyard: [], lifePaid: 2 * k, phyrexianPaidWithLife: k };
+    }
+    const kws = card.keywords || [];
+    const delve = kws.includes('delve'), improvise = kws.includes('improvise'), convoke = kws.includes('convoke');
+    if (!delve && !improvise && !convoke) return null;
+    const helpers = [];
+    if (delve) for (const c of p.graveyard) helpers.push({ kind: 'exile', card: c, colors: [] });
+    // Improvise taps ANY untapped artifact, artifact creatures included —
+    // non-creature ones first, since tapping a creature costs a body.
+    if (improvise) {
+      const artifacts = p.battlefield.filter(perm => !perm.tapped && isArtifact(perm.card) && !isLand(perm.card))
+        .sort((a, b) => (isCreature(a.card) ? 1 : 0) - (isCreature(b.card) ? 1 : 0));
+      for (const perm of artifacts) helpers.push({ kind: 'tap', perm, colors: [] });
+    }
+    if (convoke) {
+      const creatures = p.battlefield.filter(perm => !perm.tapped && isCreature(perm.card) && !helpers.some(h => h.perm === perm)).sort((a, b) => this.effectivePower(a) - this.effectivePower(b));
+      for (const perm of creatures) helpers.push({ kind: 'tap', perm, colors: convoke ? (perm.card.colors || []) : [] });
+    }
+    if (helpers.length === 0) return null;
+    // X folded into generic so helpers can pay for it too.
+    const totalGeneric = parsed.generic + xValue * (parsed.x || 0);
+    const colors = { ...parsed.colors };
+    const used = [];
+    const attempt = () => {
+      for (let k = 0; k <= Math.min(totalGeneric, helpers.length - used.length); k++) {
+        const remaining = helpers.filter(h => !used.includes(h)).slice(0, k);
+        const plan = planManaPayment(lands, { ...parsed, generic: totalGeneric - k, x: 0, colors }, 0, p.manaPool);
+        if (plan) return { ...plan, chosen: [...used, ...remaining] };
+      }
+      return null;
+    };
+    let result = attempt();
+    // Still short: convoke creatures can also pay a colored pip of their
+    // own color — cover colored pips one at a time and retry.
+    if (!result && convoke) {
+      for (const color of Object.keys(colors)) {
+        while (!result && colors[color] > 0) {
+          const h = helpers.find(x => !used.includes(x) && x.colors.includes(color));
+          if (!h) break;
+          used.push(h);
+          colors[color] -= 1;
+          result = attempt();
+        }
+        if (result) break;
+      }
+    }
+    if (!result) return null;
+    return {
+      lands: result.lands, poolUsed: result.poolUsed,
+      tapForCost: result.chosen.filter(h => h.kind === 'tap').map(h => h.perm),
+      exileFromGraveyard: result.chosen.filter(h => h.kind === 'exile').map(h => h.card),
+      lifePaid: 0, phyrexianPaidWithLife: 0,
+    };
+  }
+
+  // Carries out a plan from planSpellPayment.
+  applySpellPayment(playerId, card, plan) {
+    const p = this.getPlayer(playerId);
+    if (plan.lifePaid) {
+      p.life -= plan.lifePaid;
+      this.log(`${p.name} pays ${plan.lifePaid} life for ${card.name}'s Phyrexian mana.`);
+    }
+    for (const land of plan.lands) land.tapped = true;
+    for (const color of Object.keys(plan.poolUsed)) p.manaPool[color] -= plan.poolUsed[color];
+    for (const perm of plan.tapForCost) perm.tapped = true;
+    if (plan.tapForCost.length) this.log(`${p.name} taps ${plan.tapForCost.map(x => x.card.name).join(', ')} to help pay for ${card.name}.`);
+    for (const c of plan.exileFromGraveyard) {
+      p.graveyard = p.graveyard.filter(x => x !== c);
+      p.exile.push(c);
+    }
+    if (plan.exileFromGraveyard.length) this.log(`${p.name} exiles ${plan.exileFromGraveyard.length} card${plan.exileFromGraveyard.length > 1 ? 's' : ''} from their graveyard to delve for ${card.name}.`);
+  }
+
+  affordability(playerId, card) {
     const parsed = parseManaCost(card.manaCost);
     if (parsed.x > 0) return true; // let UI/AI decide X=0 minimum, always "affordable" at X=0
     parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId));
-    const untapped = p.battlefield.filter(perm => isLand(perm.card) && !perm.tapped);
-    return !!planManaPayment(untapped, parsed, 0, p.manaPool);
+    return !!this.planSpellPayment(playerId, card, parsed, 0);
   }
 
   // Whether this player could pay the card's base cost PLUS its Kicker cost
@@ -1561,11 +1738,9 @@ export class Game {
   canAffordKicked(playerId, card) {
     const kickerCost = this.getOptionalAdditionalCost(card);
     if (!kickerCost) return false;
-    const p = this.getPlayer(playerId);
     const parsed = parseManaCost(card.manaCost + kickerCost);
     parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId));
-    const untapped = p.battlefield.filter(perm => isLand(perm.card) && !perm.tapped);
-    return !!planManaPayment(untapped, parsed, 0, p.manaPool);
+    return !!this.planSpellPayment(playerId, card, parsed, 0);
   }
 
   // Largest X a player could actually pay for an {X}-cost card's full cost
@@ -1580,9 +1755,14 @@ export class Game {
     parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId));
     const untapped = p.battlefield.filter(perm => isLand(perm.card) && !perm.tapped);
     const poolTotal = Object.values(p.manaPool).reduce((a, b) => a + b, 0);
-    const upperBound = untapped.length + poolTotal;
+    // Delve/Improvise/Convoke helpers can pay toward X too (Stoke the
+    // Flames isn't X, but a convoke X spell like Chord of Calling is).
+    const kws = card.keywords || [];
+    const helperCount = (kws.includes('delve') ? p.graveyard.length : 0)
+      + (kws.includes('improvise') || kws.includes('convoke') ? p.battlefield.filter(perm => !perm.tapped && !isLand(perm.card)).length : 0);
+    const upperBound = untapped.length + poolTotal + helperCount;
     for (let x = upperBound; x >= 0; x--) {
-      if (planManaPayment(untapped, parsed, x, p.manaPool)) return x;
+      if (this.planSpellPayment(playerId, card, parsed, x)) return x;
     }
     return 0;
   }
@@ -1606,7 +1786,7 @@ export class Game {
   // (see getKickerCost) — folded into the mana payment below, and recorded
   // on the resulting permanent as `wasKicked` (see resolveTop) for its own
   // "if it was kicked, ..." ETB trigger to read back.
-  castSpell(playerId, instanceId, targets = [], xValue = 0, modeIndexes = null, kicked = false, { free = false, bypassTiming = false, ownerId = null } = {}) {
+  castSpell(playerId, instanceId, targets = [], xValue = 0, modeIndexes = null, kicked = false, { free = false, bypassTiming = false, ownerId = null, costOverride = null, viaSuspend = false } = {}) {
     const p = this.getPlayer(playerId);
     const idx = p.hand.findIndex(c => c.instanceId === instanceId);
     if (idx === -1) return { ok: false, reason: 'Card not in hand.' };
@@ -1625,6 +1805,7 @@ export class Game {
     // those, so this is a clean either/or rather than something needing to
     // combine with them.
     let kickerCost = null;
+    let phyrexianPaidWithLife = 0;
     if (!free) {
       // "As an additional cost to cast this spell, pay X life" (Toxic
       // Deluge) — X here is a pure life cost, unrelated to the spell's own
@@ -1640,14 +1821,13 @@ export class Game {
       // parsing each separately and adding the results) reuses
       // parseManaCost's own symbol-scanning as-is — it just sees more
       // {...} tokens, in any order.
-      const parsed = parseManaCost(card.manaCost + (kickerCost || ''));
+      // costOverride: an alternative cost replacing the mana cost (Miracle).
+      const parsed = parseManaCost((costOverride ?? card.manaCost) + (kickerCost || ''));
       parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId));
-      const untapped = p.battlefield.filter(perm => isLand(perm.card) && !perm.tapped);
-      const payment = planManaPayment(untapped, parsed, lifePaymentX ? 0 : xValue, p.manaPool);
+      const payment = this.planSpellPayment(playerId, card, parsed, lifePaymentX ? 0 : xValue);
       if (!payment) return { ok: false, reason: 'Not enough mana.' };
-
-      for (const land of payment.lands) land.tapped = true;
-      for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
+      this.applySpellPayment(playerId, card, payment);
+      phyrexianPaidWithLife = payment.phyrexianPaidWithLife;
       if (lifePaymentX && xValue > 0) {
         p.life -= xValue;
         this.log(`${p.name} pays ${xValue} life as an additional cost to cast ${card.name}.`);
@@ -1672,12 +1852,20 @@ export class Game {
       xValue,
       modeIndexes,
       kicked: !!kickerCost && !!getKickerCost(card),
+      phyrexianPaidWithLife,
+      viaSuspend,
       buyback: !!kickerCost && !getKickerCost(card) && !!getBuybackCost(card),
+      entwined: !!kickerCost && !getKickerCost(card) && !getBuybackCost(card) && !!getEntwineCost(card),
       isPermanentSpell: isPermanentType(card) && !isAura(card),
       isAura: isAura(card),
     };
+    // Entwine paid: every mode, regardless of which were picked.
+    if (stackItem.entwined) {
+      const modal = getSpellModesFromText(card);
+      if (modal) stackItem.modeIndexes = modal.modes.map((_, i) => i);
+    }
     this.stack.push(stackItem);
-    this.log(`${p.name} casts ${card.name}${stackItem.kicked ? ' (kicked)' : ''}${stackItem.buyback ? ' (with buyback)' : ''}${free ? ' without paying its mana cost' : ''}.`);
+    this.log(`${p.name} casts ${card.name}${stackItem.kicked ? ' (kicked)' : ''}${stackItem.buyback ? ' (with buyback)' : ''}${stackItem.entwined ? ' (entwined)' : ''}${free ? ' without paying its mana cost' : ''}.`);
     this.triggerCastSpell(playerId, card);
     this.triggerBecomesTarget(targets);
     this.maybeCounterForWard(stackItem);
@@ -1815,6 +2003,10 @@ export class Game {
       return;
     }
     try {
+      // Afterlife N: "when this creature dies, create N 1/1 white and black
+      // Spirit creature tokens with flying" — for its controller.
+      const afterlife = this.keywordAmount(diedPerm.card, 'afterlife');
+      if (afterlife > 0) this.applyTokenEffect({ controllerId: diedPerm.controllerId, card: diedPerm.card }, afterlife, 1, 1, 'white black spirit', 'flying');
       const diedControllerId = diedPerm.controllerId;
       const watchers = [];
       for (const pl of this.players) for (const perm of pl.battlefield) watchers.push(perm);
@@ -1911,6 +2103,14 @@ export class Game {
   // triggerAttacks — this is always about a creature's own controller
   // seeing it connect, never an opponent watching it happen.
   triggerCombatDamageToPlayer(sourcePerm, amount) {
+    // Renown N: "when this deals combat damage to a player, if it isn't
+    // renowned, put N +1/+1 counters on it and it becomes renowned."
+    const renown = this.keywordAmount(sourcePerm.card, 'renown');
+    if (renown > 0 && !sourcePerm.renowned && this.findPermanent(sourcePerm.id)) {
+      sourcePerm.renowned = true;
+      this.log(`${sourcePerm.card.name} becomes renowned.`);
+      this.applyCounterAdditionEffect({ controllerId: sourcePerm.controllerId, card: sourcePerm.card, target: { type: 'permanent', id: sourcePerm.id } }, renown, '+1/+1');
+    }
     const controller = this.getPlayer(sourcePerm.controllerId);
     for (const watcher of controller.battlefield) {
       const triggers = interpretCombatDamageTriggers(watcher.card);
@@ -1951,6 +2151,14 @@ export class Game {
       // Allosaurus, and the whole Kicker archetype) sees the real value
       // when its own ETB trigger checks it.
       perm.wasKicked = !!item.kicked;
+      // Suspend: a creature cast when its last time counter came off has haste.
+      if (item.viaSuspend && isCreature(card)) perm.tempKeywords.push('haste');
+      // Compleated: a planeswalker enters with two fewer loyalty counters
+      // for each Phyrexian symbol in its cost that was paid with life.
+      if (item.phyrexianPaidWithLife && (card.keywords || []).includes('compleated') && perm.counters.loyalty != null) {
+        perm.counters.loyalty = Math.max(0, perm.counters.loyalty - 2 * item.phyrexianPaidWithLife);
+        this.log(`${card.name} is compleated — it enters with ${2 * item.phyrexianPaidWithLife} fewer loyalty counters.`);
+      }
       // Same idea for Escape (Uro, Titan of Nature's Wrath's own "sacrifice
       // it unless it escaped") — see castFromGraveyard.
       perm.escaped = !!item.viaEscape;
@@ -2000,7 +2208,9 @@ export class Game {
         return;
       }
       const targetPerm = target && this.findPermanent(target.id);
-      if (!targetPerm) {
+      // Protection includes "can't be Enchanted by [quality]" — gaining it
+      // in response makes the Aura's target illegal, same as it leaving.
+      if (!targetPerm || this.isProtectedFrom(targetPerm, card)) {
         this.log(`${card.name} has no legal target and is put into the graveyard.`);
         p.graveyard.push(card);
         return;
@@ -2627,6 +2837,241 @@ export class Game {
     return { ok: true };
   }
 
+  // Casts `card` outside the normal click-to-cast flow — Suspend's free
+  // cast when the last time counter comes off, Miracle's cast on draw —
+  // with targets chosen automatically by the same picker the AI uses (it
+  // knows a "target player draws" spell should target its caster). Reuses
+  // castSpell entirely by putting the card in hand first if it isn't
+  // already there; on failure that temporary hand copy is removed again
+  // and the caller decides where the card goes.
+  castFromOutsideHand(playerId, card, castOpts = {}) {
+    const p = this.getPlayer(playerId);
+    const wasInHand = p.hand.includes(card);
+    if (!wasInHand) p.hand.push(card);
+    const kinds = this.getRequiredTargetKinds(card);
+    const targets = pickTargetsForKinds(this, card, playerId, kinds).filter(Boolean);
+    let result = { ok: false };
+    if (this.getMinRequiredTargetCount(card) <= targets.length) {
+      result = this.castSpell(playerId, card.instanceId, targets, castOpts.xValue || 0, null, false, { bypassTiming: true, ...castOpts });
+    }
+    if (!result.ok && !wasInHand) {
+      const i = p.hand.findIndex(c => c.instanceId === card.instanceId);
+      if (i !== -1) p.hand.splice(i, 1);
+    }
+    return result.ok;
+  }
+
+  // ---------- Suspend ----------
+  // "Rather than cast this card from your hand, you may pay [cost] and exile
+  // it with N time counters on it." Usable whenever the card could be cast
+  // (an instant at instant speed, otherwise sorcery speed).
+
+  getSuspendInfo(card) { return getSuspendInfo(card); }
+
+  canSuspend(playerId, instanceId) {
+    if (this.gameOver || this.pendingRequest) return false;
+    if (this.priorityPlayer.id !== playerId) return false;
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    const info = card && getSuspendInfo(card);
+    if (!info) return false;
+    const instantSpeed = isInstant(card) || /flash/.test((card.keywords || []).join(','));
+    if (!instantSpeed && !(p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
+    return !!planManaPayment(untapped, parseManaCost(info.manaCost), 0, p.manaPool);
+  }
+
+  suspend(playerId, instanceId) {
+    if (!this.canSuspend(playerId, instanceId)) return { ok: false, reason: 'Cannot suspend that right now.' };
+    const p = this.getPlayer(playerId);
+    const idx = p.hand.findIndex(c => c.instanceId === instanceId);
+    const card = p.hand[idx];
+    const info = getSuspendInfo(card);
+    const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
+    const payment = planManaPayment(untapped, parseManaCost(info.manaCost), 0, p.manaPool);
+    for (const land of payment.lands) land.tapped = true;
+    for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
+    p.hand.splice(idx, 1);
+    p.suspended.push({ card, timeCounters: info.time });
+    this.log(`${p.name} suspends ${card.name} with ${info.time} time counter${info.time === 1 ? '' : 's'}.`);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  // At the beginning of its owner's upkeep, each suspended card loses a
+  // time counter; when the last comes off it's cast without paying its
+  // mana cost (a creature cast this way gains haste — see resolveTop's
+  // viaSuspend). One it can't be cast (no legal target) stays exiled.
+  tickSuspended() {
+    const p = this.active;
+    for (const entry of [...p.suspended]) {
+      entry.timeCounters -= 1;
+      if (entry.timeCounters > 0) {
+        this.log(`${entry.card.name} loses a time counter (${entry.timeCounters} left).`);
+        continue;
+      }
+      p.suspended = p.suspended.filter(e => e !== entry);
+      this.log(`The last time counter is removed from ${entry.card.name}.`);
+      if (!this.castFromOutsideHand(p.id, entry.card, { free: true, viaSuspend: true })) {
+        p.exile.push(entry.card);
+        this.log(`${entry.card.name} can't be cast and stays exiled.`);
+      }
+    }
+  }
+
+  // ---------- Miracle ----------
+  // "You may cast this card for its miracle cost when you draw it if it's
+  // the first card you drew this turn." Called from drawCard. The AI casts
+  // it when affordable and worthwhile (a board wipe only when it hurts the
+  // opponent more); a human is asked.
+  offerMiracle(player, card) {
+    const cost = getMiracleCost(card);
+    if (!cost || this.gameOver) return;
+    const parsed = parseManaCost(cost);
+    let xValue = 0;
+    if (parsed.x > 0) {
+      const p = player;
+      const bound = p.battlefield.filter(x => isLand(x.card) && !x.tapped).length + Object.values(p.manaPool).reduce((a, b) => a + b, 0);
+      for (let x = bound; x >= 1; x--) if (this.planSpellPayment(player.id, card, parsed, x)) { xValue = x; break; }
+      if (xValue === 0) return;
+    } else if (!this.planSpellPayment(player.id, card, parsed, 0)) {
+      return;
+    }
+    const cast = () => {
+      if (!player.hand.includes(card)) return;
+      if (this.castFromOutsideHand(player.id, card, { costOverride: cost, xValue })) {
+        this.log(`${player.name} casts ${card.name} for its miracle cost.`);
+      }
+    };
+    if (player.isAI) {
+      const text = (card.oracleText || '').toLowerCase();
+      if (/\ball creatures\b|\beach creature\b/.test(text)) {
+        const power = pl => pl.battlefield.filter(x => isCreature(x.card)).reduce((s, x) => s + this.effectivePower(x), 0);
+        if (power(this.opponentOf(player.id)) <= power(player)) return;
+      }
+      cast();
+      return;
+    }
+    this.requestChoice(player.id, `Miracle — ${card.name}`, [
+      { label: `Cast ${card.name} for its miracle cost ${cost}${xValue ? ` (X=${xValue})` : ''}`, resolve: cast },
+      { label: 'Keep it in hand', resolve: () => {} },
+    ]);
+  }
+
+  // ---------- Transmute ----------
+  // "{cost}, Discard this card: Search your library for a card with the same
+  // mana value as this card, reveal it, put it into your hand, then
+  // shuffle. Transmute only as a sorcery." Picks a nonland card with a
+  // different name when there is one (no real choose-a-card UI).
+
+  getTransmuteCost(card) { return getTransmuteCost(card); }
+
+  canTransmute(playerId, instanceId) {
+    if (this.gameOver || this.pendingRequest) return false;
+    const p = this.getPlayer(playerId);
+    if (!(p.id === this.active.id && this.priorityPlayer.id === playerId && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    const cost = card && getTransmuteCost(card);
+    if (!cost) return false;
+    const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
+    return !!planManaPayment(untapped, parseManaCost(cost), 0, p.manaPool);
+  }
+
+  transmute(playerId, instanceId) {
+    if (!this.canTransmute(playerId, instanceId)) return { ok: false, reason: 'Cannot transmute that right now.' };
+    const p = this.getPlayer(playerId);
+    const idx = p.hand.findIndex(c => c.instanceId === instanceId);
+    const card = p.hand[idx];
+    const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
+    const payment = planManaPayment(untapped, parseManaCost(getTransmuteCost(card)), 0, p.manaPool);
+    for (const land of payment.lands) land.tapped = true;
+    for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
+    p.hand.splice(idx, 1);
+    p.graveyard.push(card);
+    this.log(`${p.name} transmutes ${card.name}.`);
+    const sameCmc = p.library.filter(c => (c.cmc || 0) === (card.cmc || 0));
+    const pick = sameCmc.find(c => !isLand(c) && c.name !== card.name) || sameCmc[0];
+    if (pick) {
+      p.library = p.library.filter(c => c !== pick);
+      p.hand.push(pick);
+      this.log(`${card.name} finds ${pick.name}.`);
+    } else {
+      this.log(`${card.name} finds no card with mana value ${card.cmc || 0}.`);
+    }
+    p.library = shuffle(p.library);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  // N from a numbered keyword line on the card's own text ("Bushido 2",
+  // "Afflict 1", "Renown 1", "Afterlife 3"), or 0. Reminder text stripped.
+  keywordAmount(card, keyword) {
+    const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+    const m = text.match(new RegExp(`(?:^|,\\s*)${keyword} (\\d+)`, 'im'));
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  // "Whenever this creature attacks" keyword triggers that care about the
+  // whole attack: Mentor (a +1/+1 counter on another attacker with lesser
+  // power — auto-picks the strongest such, which is what you'd want) and
+  // Training (a counter on itself if it attacks alongside something with
+  // greater power). Decayed attackers are marked to be sacrificed at end
+  // of combat.
+  applyAttackKeywordTriggers(attackers) {
+    for (const perm of attackers) {
+      const kws = this.effectiveKeywords(perm);
+      const power = this.effectivePower(perm);
+      if (kws.has('mentor')) {
+        const pupils = attackers.filter(o => o.id !== perm.id && this.effectivePower(o) < power && this.canBeTargetedBy(o, perm.controllerId, perm.card));
+        if (pupils.length > 0) {
+          const pupil = pupils.sort((a, b) => this.effectivePower(b) - this.effectivePower(a))[0];
+          this.log(`Mentor: ${perm.card.name} mentors ${pupil.card.name}.`);
+          this.applyCounterAdditionEffect({ controllerId: perm.controllerId, card: perm.card, target: { type: 'permanent', id: pupil.id } }, 1, '+1/+1');
+        }
+      }
+      if (kws.has('training') && attackers.some(o => o.id !== perm.id && this.effectivePower(o) > power)) {
+        this.log(`Training: ${perm.card.name} trains.`);
+        this.applyCounterAdditionEffect({ controllerId: perm.controllerId, card: perm.card, target: { type: 'permanent', id: perm.id } }, 1, '+1/+1');
+      }
+      if (kws.has('decayed')) perm.sacrificeAtEndOfCombat = true;
+    }
+  }
+
+  // "Whenever this creature blocks or becomes blocked" keyword triggers,
+  // checked once blocks are locked in: Bushido N (+N/+N until end of turn,
+  // for blockers and blocked attackers alike) and Afflict N (the defending
+  // player loses N life when this attacker becomes blocked).
+  applyBlockKeywordTriggers() {
+    for (const pl of this.players) {
+      for (const perm of pl.battlefield) {
+        const isBlocking = !!perm.blocking;
+        const isBlocked = perm.attacking && perm.blockedBy.length > 0;
+        if (!isBlocking && !isBlocked) continue;
+        const bushido = this.keywordAmount(perm.card, 'bushido');
+        if (bushido > 0) {
+          perm.tempBuffs.push({ power: bushido, toughness: bushido });
+          this.log(`Bushido: ${perm.card.name} gets +${bushido}/+${bushido} until end of turn.`);
+        }
+        const afflict = isBlocked ? this.keywordAmount(perm.card, 'afflict') : 0;
+        if (afflict > 0) {
+          const defending = this.opponentOf(perm.controllerId);
+          defending.life -= afflict;
+          this.log(`Afflict: ${perm.card.name} became blocked — ${defending.name} loses ${afflict} life.`);
+        }
+      }
+    }
+  }
+
+  // Decayed: "When this creature attacks, sacrifice it at end of combat."
+  sacrificeDecayedAttackers() {
+    for (const pl of this.players) {
+      for (const perm of pl.battlefield.filter(x => x.sacrificeAtEndOfCombat)) {
+        this.log(`${perm.card.name} is sacrificed at end of combat (decayed).`);
+        this.movePermanentToGraveyard(perm, { sacrifice: true });
+      }
+    }
+  }
+
   // Exalted: "whenever a creature you control attacks alone, that creature
   // gets +1/+1 until end of turn" — one trigger per exalted instance the
   // attacking player controls, on any permanent type (Cathedral of War is
@@ -2719,6 +3164,7 @@ export class Game {
     if (!target || target.controllerId !== playerId || !isCreature(target.card)) {
       return { ok: false, reason: 'Must target a creature you control.' };
     }
+    if (this.isProtectedFrom(target, equipPerm.card)) return { ok: false, reason: `${target.card.name} has protection from ${equipPerm.card.name}.` };
 
     const p = this.getPlayer(playerId);
     const parsed = parseManaCost(this.getEquipCost(equipPerm));
@@ -2751,6 +3197,10 @@ export class Game {
     }
     if (ctx.target?.type === 'permanent') {
       const perm = this.findPermanent(ctx.target.id);
+      if (perm && this.isProtectedFrom(perm, ctx.card)) {
+        this.log(`${perm.card.name} has protection — the damage from ${ctx.card.name} is prevented.`);
+        return;
+      }
       if (perm) {
         // Real rule 120.3c: damage to a planeswalker removes that many
         // loyalty counters immediately, rather than being marked as damage
@@ -2857,13 +3307,27 @@ export class Game {
     this.checkStateBasedActions();
   }
 
+  // Whether `counterCard` can counter this stack item: not itself, not a
+  // "this spell can't be countered" spell, and matching the counterspell's
+  // own type restriction (Negate's noncreature, Essence Scatter's creature,
+  // ...). Permanent spells ARE counterable — the engine used to only ever
+  // let a counterspell target instants and sorceries, so even a plain
+  // Counterspell couldn't touch a creature spell.
+  canCounterTarget(item, counterCard) {
+    if (!item || !counterCard || item.card === counterCard) return false;
+    if (/this spell can'?t be countered/i.test(item.card.oracleText || '')) return false;
+    const filter = getCounterSpellFilter(counterCard);
+    if (filter === undefined) return true; // a non-standard counter effect — no restriction to check
+    return spellMatchesFilter(item.card, filter);
+  }
+
   applyCounterEffect(ctx) {
-    let idx = ctx.target?.type === 'stack' ? this.stack.findIndex(s => s.id === ctx.target.id) : -1;
+    let idx = ctx.target?.type === 'stack' ? this.stack.findIndex(s => s.id === ctx.target.id && this.canCounterTarget(s, ctx.card)) : -1;
     if (idx === -1) {
-      // Fall back to the topmost eligible spell (closest to resolving) if no
-      // specific target was supplied or it's no longer on the stack.
+      // Fall back to the topmost counterable OPPONENT's spell (closest to
+      // resolving) if no legal target was supplied or it's gone.
       for (let i = this.stack.length - 1; i >= 0; i--) {
-        if (!this.stack[i].isPermanentSpell && !this.stack[i].isAura) { idx = i; break; }
+        if (this.stack[i].controllerId !== ctx.controllerId && this.canCounterTarget(this.stack[i], ctx.card)) { idx = i; break; }
       }
     }
     if (idx === -1) {
@@ -4326,6 +4790,40 @@ export class Game {
     this.checkStateBasedActions();
   }
 
+  // Puts a permanent on the bottom of its OWNER's library — or every
+  // creature, for Terminus. It leaves the battlefield without dying, so no
+  // "dies" triggers; a commander may go to the command zone instead.
+  applyTuckEffect(ctx, { allCreatures = false } = {}) {
+    let perms;
+    if (allCreatures) {
+      perms = this.players.flatMap(pl => pl.battlefield.filter(x => isCreature(x.card)));
+    } else {
+      const perm = ctx.target?.type === 'permanent' ? this.findPermanent(ctx.target.id) : null;
+      perms = perm ? [perm] : [];
+    }
+    for (const perm of perms) {
+      const p = this.getPlayer(perm.controllerId);
+      this._lastTucked = { controllerId: perm.controllerId, toughness: this.effectiveToughness(perm) };
+      p.battlefield = p.battlefield.filter(x => x.id !== perm.id);
+      this.detachFromLeavingBattlefield(perm);
+      this.triggerLeavesBattlefield(perm);
+      if (this.exileIfUnearthed(perm)) continue;
+      if (this.redirectCommanderToZone(perm)) continue;
+      this.getPlayer(perm.ownerId).library.push(perm.card);
+    }
+    if (perms.length) this.log(`${ctx.card.name} puts ${allCreatures ? `${perms.length} creature${perms.length === 1 ? '' : 's'}` : perms[0].card.name} on the bottom of ${allCreatures ? "their owners' libraries" : "its owner's library"}.`);
+    this.checkStateBasedActions();
+  }
+
+  applyLastTuckedLifegain() {
+    if (!this._lastTucked) return;
+    const pl = this.getPlayer(this._lastTucked.controllerId);
+    const amount = Math.max(0, this._lastTucked.toughness);
+    pl.life += amount;
+    this.log(`${pl.name} gains ${amount} life.`);
+    this._lastTucked = null;
+  }
+
   applyBounceEffect(ctx) {
     // Multi-target ("return up to two target creatures to their owners'
     // hands" — Horses of the Bruinen, Hoverguard Sweepers, ...): re-
@@ -4881,30 +5379,20 @@ export class Game {
     let bonus = 0;
     const controller = this.getPlayer(perm.controllerId);
     const isToken = /\btoken\b/i.test(perm.card.typeLine || '');
-    for (const other of controller.battlefield) {
-      const lines = (other.card.oracleText || '').toLowerCase().split('\n');
-      for (const line of lines) {
-        // An optional single qualifier word before "creatures you control"
-        // (Mikaeus's "other non-Human creatures you control") is recognized
-        // so the line matches at all, but — like other qualifiers this
-        // engine can't fully enforce — the type restriction itself isn't
-        // checked, so it applies a bit more broadly than the real card.
-        const isOtherOnly = /^other (?:[a-z-]+ )?creatures you control /.test(line);
-        const isTokenOnly = /^creature tokens you control /.test(line);
-        if (isOtherOnly && other.id === perm.id) continue;
-        if (isTokenOnly && !isToken) continue;
-        if (!isOtherOnly && !isTokenOnly && !/^(?:[a-z-]+ )?creatures you control /.test(line)) continue;
-        // "Other creatures you control OF THE CHOSEN TYPE get +1/+1"
-        // (Adaptive Automaton) — unlike the qualifier-word case above,
-        // this restriction IS enforced, since "the chosen type" resolves
-        // to a real, specific value (other.chosenType, set by
-        // applyChooseCreatureTypeEffect) rather than a type word this
-        // engine can't fully check.
-        if (/of the chosen type/.test(line)) {
-          if (!other.chosenType || !(perm.card.typeLine || '').toLowerCase().includes(other.chosenType.toLowerCase())) continue;
+    // Every player's battlefield, not just the controller's: a tribal lord
+    // with no "you control" (Lord of Atlantis's "Other Merfolk get +1/+1")
+    // pumps the opponent's creatures of that type too. parseCreatureAnthemLine
+    // / anthemAppliesTo handle "you control", "other", token-only, the
+    // chosen type (Adaptive Automaton), and the subtype restriction itself
+    // (Elvish Archdruid's "Other Elf creatures you control" — this used to
+    // pump every creature you control, Elf or not).
+    for (const pl of this.players) {
+      for (const other of pl.battlefield) {
+        for (const line of (other.card.oracleText || '').toLowerCase().replace(/\([^()]*\)/g, '').split('\n')) {
+          const a = parseCreatureAnthemLine(line.trim());
+          if (!a || (!a.power && !a.toughness) || !anthemAppliesTo(a, other, perm)) continue;
+          bonus += stat === 'power' ? a.power : a.toughness;
         }
-        const m = line.match(/get ([+-]\d+)\/([+-]\d+)/);
-        if (m) bonus += stat === 'power' ? parseInt(m[1], 10) : parseInt(m[2], 10);
       }
     }
     // Emblems (Gideon, Ally of Zendikar's "You get an emblem with
@@ -5001,22 +5489,23 @@ export class Game {
     // "Artifacts you control have hexproof." (Padeem, Consul of Innovation).
     if (isCreature(perm.card) || isArtifact(perm.card)) {
       const controller = this.getPlayer(perm.controllerId);
-      const isToken = /\btoken\b/i.test(perm.card.typeLine || '');
+      // Creature anthems/tribal lords: same parser and same every-player
+      // scope as anthemBonus (Goblin King's "Other Goblins ... have
+      // mountainwalk" reaches the opponent's Goblins too).
+      if (isCreature(perm.card)) {
+        for (const pl of this.players) {
+          for (const other of pl.battlefield) {
+            for (const line of (other.card.oracleText || '').toLowerCase().replace(/\([^()]*\)/g, '').split('\n')) {
+              const a = parseCreatureAnthemLine(line.trim());
+              if (!a || !a.grantText || !anthemAppliesTo(a, other, perm)) continue;
+              for (const kw of extractKnownKeywords(a.grantText)) set.add(kw);
+            }
+          }
+        }
+      }
       for (const other of controller.battlefield) {
         const lines = (other.card.oracleText || '').toLowerCase().split('\n');
         for (const line of lines) {
-          if (isCreature(perm.card)) {
-            // See anthemBonus's matching comment: an optional qualifier word
-            // (Mikaeus's "other non-Human creatures you control") is
-            // recognized syntactically but not enforced as a real restriction.
-            const isOtherOnly = /^other (?:[a-z-]+ )?creatures you control /.test(line);
-            const isTokenOnly = /^creature tokens you control /.test(line);
-            if (isOtherOnly && other.id === perm.id) continue;
-            if (isTokenOnly && !isToken) continue;
-            if (isOtherOnly || isTokenOnly || /^(?:[a-z-]+ )?creatures you control /.test(line)) {
-              for (const kw of extractKnownKeywords(line)) set.add(kw);
-            }
-          }
           if (isArtifact(perm.card)) {
             const isOtherOnlyArtifact = /^other artifacts you control /.test(line);
             if (isOtherOnlyArtifact && other.id === perm.id) continue;
@@ -5100,10 +5589,91 @@ export class Game {
   // ward permanent IS legal, it just triggers a reactive tax/counter (see
   // checkWardAndMaybeCounter, wired into castSpell/castCommander) rather
   // than blocking the target from being chosen at all.
-  canBeTargetedBy(perm, byControllerId) {
+  // sourceCard (optional): the spell or ability source doing the targeting,
+  // so Protection ("can't be Targeted by anything [quality]") can apply.
+  canBeTargetedBy(perm, byControllerId, sourceCard = null) {
     const kws = this.effectiveKeywords(perm);
     if (kws.has('shroud')) return false;
     if (kws.has('hexproof') && perm.controllerId !== byControllerId) return false;
+    if (sourceCard && this.isProtectedFrom(perm, sourceCard)) return false;
+    return true;
+  }
+
+  // ---------- Protection ----------
+  // "Protection from [quality]" means DEBT: damage from sources with that
+  // quality is prevented, it can't be Enchanted/Equipped by them, Blocked
+  // by creatures with it, or Targeted by them. Qualities come from the
+  // permanent's own text ("Protection from black", Paladin en-Vec's "...
+  // protection from black and from red") and from whatever is attached to
+  // it (Sword of Fire and Ice's "equipped creature ... has protection from
+  // red and from blue"), plus perm.tempProtections for "gains protection
+  // from ... until end of turn" effects. Returns an array of qualities:
+  // a color letter, 'everything', 'multicolored', 'monocolored', or a
+  // lowercase singular type/subtype word ('creature', 'artifact', 'dragon').
+  getProtections(perm) {
+    const COLOR = { white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G' };
+    const qualities = [...(perm.tempProtections || [])];
+    const collect = (text) => {
+      const clean = (text || '').replace(/\([^()]*\)/g, '');
+      for (const m of clean.matchAll(/protection from ([^.;\n]+)/gi)) {
+        for (let q of m[1].toLowerCase().split(/,?\s*and from\s+|,\s*from\s+/)) {
+          q = q.trim().replace(/^the color of your choice$/, '');
+          if (!q) continue;
+          if (COLOR[q]) qualities.push(COLOR[q]);
+          else if (q === 'all colors' || q === 'each color') qualities.push('W', 'U', 'B', 'R', 'G');
+          else qualities.push(q.replace(/s$/, ''));
+        }
+      }
+    };
+    collect(perm.card.oracleText);
+    for (const pl of this.players) {
+      for (const other of pl.battlefield) {
+        if (other.attachedTo !== perm.id) continue;
+        const m = (other.card.oracleText || '').match(/(?:enchanted|equipped) creature[^.]*?\bhas\b([^.]*protection from[^.]*)/i);
+        if (m) collect(m[1]);
+      }
+    }
+    return qualities;
+  }
+
+  isProtectedFrom(perm, sourceCard) {
+    if (!sourceCard) return false;
+    const qualities = this.getProtections(perm);
+    if (qualities.length === 0) return false;
+    const colors = sourceCard.colors || [];
+    const typeLine = (sourceCard.typeLine || '').toLowerCase();
+    return qualities.some(q => {
+      if (q === 'everything') return true;
+      if (q.length === 1) return colors.includes(q);
+      if (q === 'multicolored') return colors.length > 1;
+      if (q === 'monocolored') return colors.length === 1;
+      if (q === 'colorless') return colors.length === 0;
+      return new RegExp(`\\b${q}s?\\b`).test(typeLine);
+    });
+  }
+
+  // Whether `blocker` may legally block `attacker` — every per-pair
+  // blocking restriction in one place, used by declareBlockers, the AI, and
+  // the UI alike. (Menace is a whole-block rule, not per-pair; see
+  // declareBlockers.)
+  canBlockAttacker(blocker, attacker) {
+    if (!blocker || !attacker || blocker.tapped || !isCreature(blocker.card)) return false;
+    const bk = this.effectiveKeywords(blocker);
+    const ak = this.effectiveKeywords(attacker);
+    if (bk.has('cantBlock') || bk.has('decayed')) return false;
+    if (ak.has('flying') && !bk.has('flying') && !bk.has('reach')) return false;
+    const blockerColors = blocker.card.colors || [];
+    const blockerIsArtifact = /\bartifact\b/i.test(blocker.card.typeLine || '');
+    // Fear: only artifact and/or black creatures can block it.
+    if (ak.has('fear') && !blockerIsArtifact && !blockerColors.includes('B')) return false;
+    // Intimidate: only artifact creatures and/or ones sharing a color.
+    if (ak.has('intimidate') && !blockerIsArtifact && !blockerColors.some(c => (attacker.card.colors || []).includes(c))) return false;
+    // Landwalk: unblockable while the defending player controls that land type.
+    const defender = this.getPlayer(blocker.controllerId);
+    for (const [kw, landType] of [['plainswalk', 'plains'], ['islandwalk', 'island'], ['swampwalk', 'swamp'], ['mountainwalk', 'mountain'], ['forestwalk', 'forest']]) {
+      if (ak.has(kw) && defender.battlefield.some(p => (p.card.typeLine || '').toLowerCase().includes(landType))) return false;
+    }
+    if (this.isProtectedFrom(attacker, blocker.card)) return false;
     return true;
   }
 
@@ -5115,7 +5685,7 @@ export class Game {
   // opponent player themselves if there's no such creature.
   autoPickTarget(kind, controllerId) {
     const opponent = this.opponentOf(controllerId);
-    if (kind === 'player') return { type: 'player', id: opponent.id };
+    if (kind === 'player' || kind === 'playerOrPlaneswalker') return { type: 'player', id: opponent.id };
     const enemyCreatures = opponent.battlefield.filter(perm => isCreature(perm.card) && this.canBeTargetedBy(perm, controllerId));
     if (enemyCreatures.length > 0) {
       const best = enemyCreatures.sort((a, b) => this.effectivePower(b) - this.effectivePower(a))[0];
@@ -5184,6 +5754,7 @@ export class Game {
       this.triggerEnchantedPlayerAttacked(opponent.id);
     }
     if (newAttackers.length === 1) this.applyExalted(playerId, newAttackers[0]);
+    this.applyAttackKeywordTriggers(newAttackers);
     this.pendingRequest = null;
     const anyAttackers = p.battlefield.some(x => x.attacking);
     this.log(anyAttackers
@@ -5219,19 +5790,29 @@ export class Game {
   declareBlockers(playerId, blockMap) {
     if (playerId !== this.defender.id || this.step !== 'declareBlockers') return false;
     const p = this.getPlayer(playerId);
+    const usedBlockers = new Set();
     for (const { blockerId, attackerId } of blockMap) {
       const blocker = p.battlefield.find(x => x.id === blockerId);
       const attacker = this.findPermanent(attackerId);
-      if (!blocker || !attacker || blocker.tapped) continue;
-      if (this.effectiveKeywords(blocker).has('cantBlock')) continue;
-      const attackerKws = this.effectiveKeywords(attacker);
-      if (attackerKws.has('flying') || attackerKws.has('reach')) {
-        const blockerKws = this.effectiveKeywords(blocker);
-        if (attackerKws.has('flying') && !blockerKws.has('flying') && !blockerKws.has('reach')) continue;
-      }
+      if (!attacker || !attacker.attacking || usedBlockers.has(blockerId)) continue;
+      if (!this.canBlockAttacker(blocker, attacker)) continue;
+      usedBlockers.add(blockerId);
       blocker.blocking = attacker.id;
       attacker.blockedBy.push(blocker.id);
     }
+    // Menace: "can't be blocked except by two or more creatures" — a rule
+    // about the whole block, so it's checked once every block is assigned.
+    // A lone blocker on a menace attacker is removed (that blocker simply
+    // doesn't block, which is what an illegal block declaration amounts to).
+    for (const attacker of this.active.battlefield.filter(x => x.attacking)) {
+      if (attacker.blockedBy.length === 1 && this.effectiveKeywords(attacker).has('menace')) {
+        const lone = this.findPermanent(attacker.blockedBy[0]);
+        if (lone) lone.blocking = null;
+        attacker.blockedBy = [];
+        this.log(`${attacker.card.name} has menace — a single creature can't block it.`);
+      }
+    }
+    this.applyBlockKeywordTriggers();
     this.pendingRequest = null;
     const blockedCount = p.battlefield.filter(x => x.blocking).length;
     this.log(blockedCount > 0 ? `${p.name} assigns blockers.` : `${p.name} doesn't block.`);
@@ -5385,8 +5966,14 @@ export class Game {
         const isLast = i === blockers.length - 1;
         const need = kws.has('deathtouch') ? 1 : Math.max(this.effectiveToughness(blocker) - blocker.damage, 0);
         const assign = (kws.has('trample') || !isLast) ? Math.min(remaining, need) : remaining;
-        blocker.damage += assign;
         remaining -= assign;
+        // Protection: the damage is still ASSIGNED (it counts toward lethal
+        // for trample), just prevented — no damage, no lifelink.
+        if (this.isProtectedFrom(blocker, attackerPerm.card)) {
+          this.log(`${blocker.card.name} has protection — ${attackerPerm.card.name}'s ${assign} damage is prevented.`);
+          continue;
+        }
+        blocker.damage += assign;
         this.log(`${attackerPerm.card.name} deals ${assign} damage to ${blocker.card.name}.`);
         if (kws.has('lifelink')) this.getPlayer(attackerPerm.controllerId).life += assign;
       }
@@ -5399,6 +5986,10 @@ export class Game {
       let incoming = 0;
       let blockerHasDeathtouch = false;
       for (const blocker of blockers) {
+        if (this.isProtectedFrom(attackerPerm, blocker.card)) {
+          this.log(`${attackerPerm.card.name} has protection — ${blocker.card.name}'s damage is prevented.`);
+          continue;
+        }
         incoming += this.effectivePower(blocker);
         if (this.effectiveKeywords(blocker).has('deathtouch')) blockerHasDeathtouch = true;
         if (this.effectiveKeywords(blocker).has('lifelink')) {
@@ -5485,7 +6076,8 @@ export class Game {
   // Buyback. Both go through the same `kicked` flag on castSpell (and the
   // same "pay extra?" decision for the AI and the human prompt); the stack
   // item records which one it was, since their payoffs differ.
-  getOptionalAdditionalCost(card) { return getKickerCost(card) || getBuybackCost(card); }
+  getOptionalAdditionalCost(card) { return getKickerCost(card) || getBuybackCost(card) || getEntwineCost(card); }
+  getEntwineCost(card) { return getEntwineCost(card); }
 
   // The most life a "pay X life as an additional cost" spell (Toxic
   // Deluge) can reasonably ask for — leaves at least 1, since paying
