@@ -1036,14 +1036,25 @@ function interpretEffectText(text) {
         const amt = token.slice(1).toLowerCase() === 'x' ? resolveAmount('x', ctx) : parseInt(token.slice(1), 10);
         return neg ? -amt : amt;
       };
+      // "... and can't be blocked this turn" (Distortion Strike) used to be
+      // silently dropped after the pump.
+      const unblockable = /and can'?t be blocked this turn/.test(clause);
       steps.push({
         kind: 'pump',
         targeting: 'creature',
         resolve: (game, ctx) => {
           game.applyPumpEffect(ctx, resolveSigned(pToken, ctx), resolveSigned(tToken, ctx));
           if (keywordText) game.applyTargetKeywordGrantEffect(ctx, keywordText);
+          if (unblockable) game.applyTempKeyword(ctx, 'unblockable');
         },
       });
+      continue;
+    }
+
+    // "Target creature can't be blocked this turn" (Artful Dodge, Rogue's
+    // Passage) — a temporary flag read by game.getBlockRestrictions.
+    if (/^target creature(?: you control)? can'?t be blocked this turn$/.test(clause)) {
+      steps.push({ kind: 'evasion', targeting: 'creature', resolve: (game, ctx) => game.applyTempKeyword(ctx, 'unblockable') });
       continue;
     }
 
@@ -3695,6 +3706,17 @@ export function getEntwineCost(card) {
   const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
   const m = text.match(/^entwine ((?:\{[^}]+\})+)/im);
   return m ? m[1] : null;
+}
+
+// Exploit's payoff: "When this creature exploits a creature, EFFECT"
+// (Silumgar Butcher's -3/-3) — the effect steps, or [] if none.
+export function getExploitPayoffSteps(card) {
+  const lines = replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase().replace(/\([^()]*\)/g, '').split('\n').map(s => s.trim());
+  for (const line of lines) {
+    const m = line.match(/^when this creature exploits a creature,\s*(.+)$/);
+    if (m) return interpretEffectText(m[1]);
+  }
+  return [];
 }
 
 // "When you cycle this card, EFFECT" (Krosan Tusker, the Decree cycle) —

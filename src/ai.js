@@ -570,8 +570,10 @@ export function aiDeclareAttackers(game) {
 
   const attackers = myCreatures.filter(perm => {
     const power = game.effectivePower(perm);
-    if (power <= 0) return false;
     const kws = game.effectiveKeywords(perm);
+    // A 0-power creature only attacks for its trigger (Battle cry pumps
+    // everyone else), and only if it won't just die for nothing.
+    if (power <= 0 && !kws.has('battle cry')) return false;
     // Only creatures that could LEGALLY block this attacker matter — every
     // evasion rule (flying, fear, intimidate, landwalk, protection) and
     // tapped blockers come from game.canBlockAttacker, the same check the
@@ -579,7 +581,8 @@ export function aiDeclareAttackers(game) {
     // unblockable this turn; menace needs two.
     const legalBlockers = theirBlockers.filter(b => game.canBlockAttacker(b, perm));
     if (legalBlockers.length === 0) return true;
-    if (kws.has('menace') && legalBlockers.length < 2) return true;
+    if ((kws.has('menace') || game.getBlockRestrictions(perm).minBlockers >= 2) && legalBlockers.length < 2) return true;
+    if (power <= 0) return legalBlockers.every(b => game.effectivePower(b) <= 0);
     const canBeKilledForFree = legalBlockers.some(b => game.effectivePower(b) >= game.effectiveToughness(perm) && game.effectiveToughness(b) > power);
     return !canBeKilledForFree;
   });
@@ -624,8 +627,9 @@ export function aiDeclareBlockers(game) {
     const legal = myBlockers.filter(b => !used.has(b.id) && game.canBlockAttacker(b, attacker));
     const mustChump = p.life - game.effectivePower(attacker) <= 4;
 
-    // Menace: two blockers or none at all.
-    if (game.effectiveKeywords(attacker).has('menace')) {
+    // Menace (or "can't be blocked except by two or more creatures"): two
+    // blockers or none at all.
+    if (game.effectiveKeywords(attacker).has('menace') || game.getBlockRestrictions(attacker).minBlockers >= 2) {
       if (legal.length < 2) continue;
       const pair = legal.slice().sort((a, b) => game.effectivePower(b) - game.effectivePower(a)).slice(0, 2);
       const kills = pair.reduce((s, b) => s + game.effectivePower(b), 0) >= game.effectiveToughness(attacker);

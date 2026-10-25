@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -151,6 +151,7 @@ const KNOWN_KEYWORDS = [
   'shroud', 'ward', 'defender', 'undying', 'persist',
   'fear', 'intimidate', 'plainswalk', 'islandwalk', 'swampwalk', 'mountainwalk', 'forestwalk',
   'exalted', 'decayed', 'mentor', 'training',
+  'infect', 'wither', 'shadow', 'horsemanship', 'flanking', 'battle cry',
 ];
 
 // Finds any recognized keyword abilities named in a chunk of (already
@@ -479,7 +480,10 @@ export class Game {
   // ---------- plumbing ----------
 
   onChange(fn) { this.listeners.push(fn); }
-  emit() { for (const fn of this.listeners) fn(this); }
+  emit() {
+    this.showNextChoice();
+    for (const fn of this.listeners) fn(this);
+  }
 
   // ---------- undo ----------
   // Only these fields are real game STATE — deliberately excludes
@@ -2111,6 +2115,12 @@ export class Game {
       this.log(`${sourcePerm.card.name} becomes renowned.`);
       this.applyCounterAdditionEffect({ controllerId: sourcePerm.controllerId, card: sourcePerm.card, target: { type: 'permanent', id: sourcePerm.id } }, renown, '+1/+1');
     }
+    // Ingest: that player exiles the top card of their library.
+    if (this.effectiveKeywords(sourcePerm).has('ingest')) {
+      const victim = this.opponentOf(sourcePerm.controllerId);
+      const top = victim.library.shift();
+      if (top) { victim.exile.push(top); this.log(`Ingest: ${victim.name} exiles ${top.name} from the top of their library.`); }
+    }
     const controller = this.getPlayer(sourcePerm.controllerId);
     for (const watcher of controller.battlefield) {
       const triggers = interpretCombatDamageTriggers(watcher.card);
@@ -2181,6 +2191,12 @@ export class Game {
       // Bloodthirst: same "enters with" replacement, conditional on an
       // opponent having been DEALT DAMAGE this turn (not merely losing
       // life — damageTakenThisTurn only counts real damage).
+      // Ravenous: enters with X +1/+1 counters; if X is 5 or more, draw a card.
+      if ((card.keywords || []).includes('ravenous')) {
+        const x = item.xValue || 0;
+        if (x > 0) this.applyCounterAdditionEffect({ controllerId, card, target: { type: 'permanent', id: perm.id } }, x, '+1/+1');
+        if (x >= 5) { this.log(`${card.name}'s ravenous: X is ${x}, so its controller draws a card.`); this.drawCard(this.getPlayer(controllerId)); }
+      }
       const bloodthirst = getBloodthirstAmount(card);
       if (bloodthirst > 0 && this.opponentOf(controllerId).damageTakenThisTurn > 0) {
         this.log(`${card.name}'s bloodthirst is satisfied.`);
@@ -2366,6 +2382,7 @@ export class Game {
     this.triggerTribalEtb(perm);
     this.triggerAnyEtb(perm);
     this.triggerFabricate(perm);
+    this.triggerEntryKeywords(perm);
 
     const steps = interpretPermanentTriggers(perm.card);
     if (steps.length === 0) return;
@@ -2418,13 +2435,26 @@ export class Game {
   // The resolve closures live in _pendingChoice rather than pendingRequest
   // because pendingRequest is deep-cloned for undo and can't hold
   // functions — the same split as _pendingETB above.
+  // Human choices are QUEUED: several can come up at once (two Riot
+  // creatures entering, Enlist and Exploit in the same turn), and one may
+  // arrive while some other prompt (declaring attackers, an ETB target) is
+  // still open. showNextChoice surfaces the next one whenever nothing else
+  // is pending — it's called from emit(), so any state change that clears
+  // a pendingRequest lets the queue advance.
   requestChoice(playerId, prompt, options, aiPickIndex = 0) {
     if (this.getPlayer(playerId).isAI) {
       options[aiPickIndex].resolve();
       return;
     }
-    this._pendingChoice = options;
-    this.pendingRequest = { type: 'choice', playerId, prompt, labels: options.map(o => o.label) };
+    (this._choiceQueue ||= []).push({ playerId, prompt, options });
+    this.showNextChoice();
+  }
+
+  showNextChoice() {
+    if (this.pendingRequest || !this._choiceQueue?.length || this.gameOver) return;
+    const next = this._choiceQueue.shift();
+    this._pendingChoice = next.options;
+    this.pendingRequest = { type: 'choice', playerId: next.playerId, prompt: next.prompt, labels: next.options.map(o => o.label) };
     this.emit();
   }
 
@@ -2439,6 +2469,65 @@ export class Game {
     this.emit();
     this.maybeLetAIAct();
     return true;
+  }
+
+  // Self-ETB keyword choices and triggers: Riot (counter or haste),
+  // Unleash (counter, but then it can't block), Exploit (may sacrifice a
+  // creature for a payoff), and Evolve on OTHER creatures you control.
+  triggerEntryKeywords(perm) {
+    if (!isCreature(perm.card)) return;
+    const kws = this.effectiveKeywords(perm);
+    const controller = this.getPlayer(perm.controllerId);
+    const opponent = this.opponentOf(perm.controllerId);
+    const counterOn = (p) => () => {
+      if (this.findPermanent(p.id)) this.applyCounterAdditionEffect({ controllerId: p.controllerId, card: p.card, target: { type: 'permanent', id: p.id } }, 1, '+1/+1');
+    };
+
+    if (kws.has('riot')) {
+      // AI: haste when the opponent has no creatures to block, else the counter.
+      const noBlockers = !opponent.battlefield.some(x => isCreature(x.card) && !x.tapped);
+      this.requestChoice(perm.controllerId, `${perm.card.name} — Riot`, [
+        { label: 'Enter with a +1/+1 counter', resolve: counterOn(perm) },
+        { label: 'Gain haste', resolve: () => { if (this.findPermanent(perm.id)) perm.tempKeywords.push('haste'); this.log(`${perm.card.name} gains haste (riot).`); } },
+      ], noBlockers ? 1 : 0);
+    }
+
+    if (kws.has('unleash')) {
+      // AI: take the counter (and give up blocking) only when ahead on life.
+      this.requestChoice(perm.controllerId, `${perm.card.name} — Unleash`, [
+        { label: 'Enter with a +1/+1 counter (it can\'t block)', resolve: counterOn(perm) },
+        { label: 'No counter (it can block)', resolve: () => {} },
+      ], controller.life >= opponent.life ? 0 : 1);
+    }
+
+    if (kws.has('exploit')) {
+      const payoff = getExploitPayoffSteps(perm.card);
+      const exploit = (victim) => () => {
+        if (!this.findPermanent(victim.id)) return;
+        this.log(`${perm.card.name} exploits ${victim.card.name}.`);
+        this.movePermanentToGraveyard(victim, { sacrifice: true });
+        if (payoff.length) {
+          const targets = pickTargetsForKinds(this, perm.card, perm.controllerId, expandTargetKinds(payoff), perm.id).filter(Boolean);
+          if (minRequiredTargetCount(payoff) <= targets.length) this.resolveEffectSteps(payoff, targets, { controllerId: perm.controllerId, card: perm.card, sourcePerm: perm });
+        }
+      };
+      const candidates = controller.battlefield.filter(x => isCreature(x.card)).sort((a, b) => this.effectivePower(a) - this.effectivePower(b));
+      const options = [{ label: "Don't exploit", resolve: () => {} }, ...candidates.slice(0, 6).map(c => ({ label: `Sacrifice ${c.card.name}`, resolve: exploit(c) }))];
+      // AI: exploit only a token or a creature weaker than this one, and
+      // only when there's a real payoff to get.
+      const fodderIdx = candidates.findIndex(c => c.id !== perm.id && (/\btoken\b/i.test(c.card.typeLine || '') || this.effectivePower(c) < this.effectivePower(perm)));
+      this.requestChoice(perm.controllerId, `${perm.card.name} — Exploit`, options, payoff.length && fodderIdx >= 0 && fodderIdx < 6 ? fodderIdx + 1 : 0);
+    }
+
+    // Evolve on other creatures you control: +1/+1 counter if the newcomer
+    // has greater power or greater toughness.
+    for (const other of controller.battlefield) {
+      if (other.id === perm.id || !isCreature(other.card) || !this.effectiveKeywords(other).has('evolve')) continue;
+      if (this.effectivePower(perm) > this.effectivePower(other) || this.effectiveToughness(perm) > this.effectiveToughness(other)) {
+        this.log(`Evolve: ${other.card.name} evolves.`);
+        this.applyCounterAdditionEffect({ controllerId: other.controllerId, card: other.card, target: { type: 'permanent', id: other.id } }, 1, '+1/+1');
+      }
+    }
   }
 
   // Fabricate N: "when this creature enters, put N +1/+1 counters on it or
@@ -3034,6 +3123,74 @@ export class Game {
         this.applyCounterAdditionEffect({ controllerId: perm.controllerId, card: perm.card, target: { type: 'permanent', id: perm.id } }, 1, '+1/+1');
       }
       if (kws.has('decayed')) perm.sacrificeAtEndOfCombat = true;
+
+      const controller = this.getPlayer(perm.controllerId);
+      const defending = this.opponentOf(perm.controllerId);
+      // Battle cry: each OTHER attacking creature gets +1/+0.
+      if (kws.has('battle cry')) {
+        for (const o of attackers) if (o.id !== perm.id) o.tempBuffs.push({ power: 1, toughness: 0 });
+        this.log(`Battle cry: ${perm.card.name} gives each other attacker +1/+0.`);
+      }
+      // Dethrone: +1/+1 counter if attacking the player with the most life
+      // (or tied) — in two-player, the defender at least as high as us.
+      if (kws.has('dethrone') && perm.attackTarget?.type !== 'planeswalker' && defending.life >= controller.life) {
+        this.log(`Dethrone: ${perm.card.name} attacks the player with the most life.`);
+        this.applyCounterAdditionEffect({ controllerId: perm.controllerId, card: perm.card, target: { type: 'permanent', id: perm.id } }, 1, '+1/+1');
+      }
+      // Melee: +1/+1 for each opponent attacked this combat (one, here).
+      if (kws.has('melee')) {
+        perm.tempBuffs.push({ power: 1, toughness: 1 });
+        this.log(`Melee: ${perm.card.name} gets +1/+1 until end of turn.`);
+      }
+      // Annihilator N: the defending player sacrifices N permanents —
+      // tokens first, then lands, then the cheapest (no choice UI; same
+      // auto-pick simplification as edicts).
+      const annihilator = this.keywordAmount(perm.card, 'annihilator');
+      if (annihilator > 0) {
+        const ranked = defending.battlefield.slice().sort((a, b) => {
+          const rank = x => (/\btoken\b/i.test(x.card.typeLine || '') ? 0 : isLand(x.card) ? 1 : 2);
+          return rank(a) - rank(b) || (a.card.cmc || 0) - (b.card.cmc || 0);
+        });
+        const victims = ranked.slice(0, annihilator);
+        if (victims.length) this.log(`Annihilator ${annihilator}: ${defending.name} sacrifices ${victims.map(v => v.card.name).join(', ')}.`);
+        for (const v of victims) this.movePermanentToGraveyard(v, { sacrifice: true });
+      }
+      // Provoke: untap target creature the defending player controls; it
+      // blocks this attacker if able (enforced in declareBlockers). Picks a
+      // creature this attacker would kill and survive, else skips.
+      if (kws.has('provoke')) {
+        const power = this.effectivePower(perm), toughness = this.effectiveToughness(perm);
+        const target = defending.battlefield
+          .filter(x => isCreature(x.card) && this.canBeTargetedBy(x, perm.controllerId, perm.card))
+          .filter(x => this.effectiveToughness(x) <= power && this.effectivePower(x) < toughness)
+          .sort((a, b) => this.effectivePower(b) - this.effectivePower(a))[0];
+        if (target) {
+          target.tapped = false;
+          target.provokedBy = perm.id;
+          this.log(`Provoke: ${perm.card.name} provokes ${target.card.name}.`);
+        }
+      }
+      // Enlist: tap a non-attacking creature you control that could attack
+      // to add its power to this one. The AI enlists its strongest spare
+      // creature when it isn't outnumbered on board (that creature then
+      // can't block next turn); a human is asked.
+      if (kws.has('enlist')) {
+        const eligible = controller.battlefield.filter(x => x.id !== perm.id && !x.attacking && !x.tapped && isCreature(x.card) && this.canDeclareAsAttacker(x))
+          .sort((a, b) => this.effectivePower(b) - this.effectivePower(a));
+        if (eligible.length > 0) {
+          const enlist = (helper) => () => {
+            if (!this.findPermanent(helper.id) || helper.tapped) return;
+            helper.tapped = true;
+            const bonus = this.effectivePower(helper);
+            perm.tempBuffs.push({ power: bonus, toughness: 0 });
+            this.log(`Enlist: ${helper.card.name} is tapped to give ${perm.card.name} +${bonus}/+0.`);
+          };
+          const options = [{ label: "Don't enlist", resolve: () => {} }, ...eligible.slice(0, 5).map(h => ({ label: `Enlist ${h.card.name} (+${this.effectivePower(h)}/+0)`, resolve: enlist(h) }))];
+          const theirCreatures = defending.battlefield.filter(x => isCreature(x.card)).length;
+          const aiPick = controller.battlefield.filter(x => isCreature(x.card)).length > theirCreatures ? 1 : 0;
+          this.requestChoice(perm.controllerId, `${perm.card.name} — Enlist`, options, aiPick);
+        }
+      }
     }
   }
 
@@ -3052,6 +3209,23 @@ export class Game {
           perm.tempBuffs.push({ power: bushido, toughness: bushido });
           this.log(`Bushido: ${perm.card.name} gets +${bushido}/+${bushido} until end of turn.`);
         }
+        // Rampage N: +N/+N for each creature blocking it beyond the first.
+        const rampage = isBlocked ? this.keywordAmount(perm.card, 'rampage') : 0;
+        if (rampage > 0 && perm.blockedBy.length > 1) {
+          const n = rampage * (perm.blockedBy.length - 1);
+          perm.tempBuffs.push({ power: n, toughness: n });
+          this.log(`Rampage: ${perm.card.name} gets +${n}/+${n} until end of turn.`);
+        }
+        // Flanking: each blocker without flanking gets -1/-1.
+        if (isBlocked && this.effectiveKeywords(perm).has('flanking')) {
+          for (const id of perm.blockedBy) {
+            const b = this.findPermanent(id);
+            if (b && !this.effectiveKeywords(b).has('flanking')) {
+              b.tempBuffs.push({ power: -1, toughness: -1 });
+              this.log(`Flanking: ${b.card.name} gets -1/-1 for blocking ${perm.card.name}.`);
+            }
+          }
+        }
         const afflict = isBlocked ? this.keywordAmount(perm.card, 'afflict') : 0;
         if (afflict > 0) {
           const defending = this.opponentOf(perm.controllerId);
@@ -3060,6 +3234,16 @@ export class Game {
         }
       }
     }
+    // Frenzy N: "whenever this attacks and isn't blocked, +N/+0".
+    for (const perm of this.active.battlefield) {
+      if (!perm.attacking || perm.blockedBy.length > 0) continue;
+      const frenzy = this.keywordAmount(perm.card, 'frenzy');
+      if (frenzy > 0) {
+        perm.tempBuffs.push({ power: frenzy, toughness: 0 });
+        this.log(`Frenzy: ${perm.card.name} isn't blocked and gets +${frenzy}/+0.`);
+      }
+    }
+    this.checkStateBasedActions();
   }
 
   // Decayed: "When this creature attacks, sacrifice it at end of combat."
@@ -3184,6 +3368,37 @@ export class Game {
 
   // ---------- spell effect implementations (called from effects.js) ----------
 
+  // Damage to a creature from a source with these keywords: Infect and
+  // Wither deal it as -1/-1 counters instead of marked damage.
+  damageCreature(target, amount, sourceKws) {
+    if (amount <= 0) return;
+    if (sourceKws.has('infect') || sourceKws.has('wither')) {
+      target.counters['-1/-1'] = (target.counters['-1/-1'] || 0) + amount;
+    } else {
+      target.damage += amount;
+    }
+  }
+
+  // Damage to a player: Infect gives poison counters instead of life loss.
+  // Still "damage dealt" either way (Bloodthirst, etc. see it).
+  damagePlayer(player, amount, sourceKws, sourceName) {
+    if (amount <= 0) return;
+    player.damageTakenThisTurn += amount;
+    if (sourceKws.has('infect')) {
+      player.counters.poison = (player.counters.poison || 0) + amount;
+      this.log(`${sourceName} deals ${amount} infect damage to ${player.name} (${player.counters.poison} poison).`);
+    } else {
+      player.life -= amount;
+      this.log(`${sourceName} deals ${amount} damage to ${player.name}.`);
+    }
+  }
+
+  // Keywords of whatever is dealing damage: its permanent if it has one
+  // (equipment-granted infect counts), else the card's printed keywords.
+  damageSourceKeywords(ctx) {
+    return ctx.sourcePerm && this.findPermanent(ctx.sourcePerm.id) ? this.effectiveKeywords(ctx.sourcePerm) : new Set(ctx.card?.keywords || []);
+  }
+
   applyDamageEffect(ctx, amount) {
     // Multi-target ("deals 1 damage to each of up to two target creatures"
     // — Cast into the Fire): the SAME amount to EACH chosen target — re-
@@ -3210,17 +3425,13 @@ export class Game {
           perm.counters.loyalty = (perm.counters.loyalty || 0) - amount;
           this.log(`${ctx.card.name} deals ${amount} damage to ${perm.card.name}, removing ${amount} loyalty counter${amount === 1 ? '' : 's'}.`);
         } else {
-          perm.damage += amount;
+          this.damageCreature(perm, amount, this.damageSourceKeywords(ctx));
           this.log(`${ctx.card.name} deals ${amount} damage to ${perm.card.name}.`);
         }
       }
     } else if (ctx.target?.type === 'player') {
       const pl = this.getPlayer(ctx.target.id);
-      if (pl) {
-        pl.life -= amount;
-        pl.damageTakenThisTurn += amount;
-        this.log(`${ctx.card.name} deals ${amount} damage to ${pl.name}.`);
-      }
+      if (pl) this.damagePlayer(pl, amount, this.damageSourceKeywords(ctx), ctx.card.name);
     }
   }
 
@@ -3959,6 +4170,15 @@ export class Game {
   // Single-target keyword grant "until end of turn" (Mishra's Command's
   // "gains haste" mode, and similar) — as opposed to applyMassKeywordGrantEffect
   // above, which hits every creature on the battlefield.
+  // Grants one keyword-like flag to the targeted creature until end of turn
+  // (cleared with the rest of tempKeywords at cleanup).
+  applyTempKeyword(ctx, keyword) {
+    const perm = ctx.target?.type === 'permanent' ? this.findPermanent(ctx.target.id) : null;
+    if (!perm) return;
+    perm.tempKeywords.push(keyword);
+    this.log(`${perm.card.name} ${keyword === 'unblockable' ? "can't be blocked" : `gains ${keyword}`} this turn.`);
+  }
+
   applyTargetKeywordGrantEffect(ctx, keywordText) {
     if (ctx.target?.type !== 'permanent') return;
     const perm = this.findPermanent(ctx.target.id);
@@ -5652,6 +5872,37 @@ export class Game {
     });
   }
 
+  // Static blocking restrictions printed on a creature or granted by what's
+  // attached to it: "This creature can't be blocked" (Invisible Stalker;
+  // Whispersilk Cloak's "Equipped creature can't be blocked"), "can't be
+  // blocked except by creatures with flying or reach" (Signal Pest),
+  // "except by two or more creatures", "by more than one creature"
+  // (Krosan Vorine), "by creatures with power 2 or less", and its own
+  // "can't block" (Tormented Soul). Reminder text ignored.
+  getBlockRestrictions(perm) {
+    const r = { unblockable: false, exceptKeywords: null, minBlockers: 1, maxBlockers: Infinity, minBlockerPower: null, cantBlock: false };
+    const texts = [];
+    const name = perm.card.name, shortName = name.split(',')[0];
+    const self = (perm.card.oracleText || '').split(name).join('this creature').split(shortName).join('this creature');
+    texts.push(self);
+    for (const pl of this.players) for (const other of pl.battlefield) {
+      if (other.attachedTo === perm.id) texts.push((other.card.oracleText || '').replace(/(?:equipped|enchanted) creature/gi, 'this creature'));
+    }
+    for (const raw of texts) {
+      const text = raw.toLowerCase().replace(/\([^()]*\)/g, '');
+      if (/this creature can'?t block\b/.test(text)) r.cantBlock = true;
+      if (/this creature (?:can'?t block and )?can'?t be blocked(?! except| by)/.test(text) || /\band can'?t be blocked(?! except| by)/.test(text)) r.unblockable = true;
+      let m = text.match(/can'?t be blocked except by creatures with ([a-z ]+?)(?: or ([a-z ]+?))?\./);
+      if (m) r.exceptKeywords = [m[1].trim(), m[2]?.trim()].filter(Boolean);
+      if (/can'?t be blocked except by two or more creatures/.test(text)) r.minBlockers = 2;
+      if (/can'?t be blocked by more than one creature/.test(text)) r.maxBlockers = 1;
+      m = text.match(/can'?t be blocked by creatures with power (\d+) or less/);
+      if (m) r.minBlockerPower = parseInt(m[1], 10) + 1;
+    }
+    if ((perm.tempKeywords || []).includes('unblockable')) r.unblockable = true;
+    return r;
+  }
+
   // Whether `blocker` may legally block `attacker` — every per-pair
   // blocking restriction in one place, used by declareBlockers, the AI, and
   // the UI alike. (Menace is a whole-block rule, not per-pair; see
@@ -5661,7 +5912,18 @@ export class Game {
     const bk = this.effectiveKeywords(blocker);
     const ak = this.effectiveKeywords(attacker);
     if (bk.has('cantBlock') || bk.has('decayed')) return false;
+    if (this.getBlockRestrictions(blocker).cantBlock) return false;
+    const ar = this.getBlockRestrictions(attacker);
+    if (ar.unblockable) return false;
+    if (ar.exceptKeywords && !ar.exceptKeywords.some(k => bk.has(k))) return false;
+    if (ar.minBlockerPower != null && this.effectivePower(blocker) < ar.minBlockerPower) return false;
+    // Unleash: can't block while it has a +1/+1 counter on it.
+    if (bk.has('unleash') && (blocker.counters['+1/+1'] || 0) > 0) return false;
     if (ak.has('flying') && !bk.has('flying') && !bk.has('reach')) return false;
+    // Shadow: blocks and is blocked only by creatures with shadow.
+    if (ak.has('shadow') !== bk.has('shadow')) return false;
+    // Horsemanship: only creatures with horsemanship can block it.
+    if (ak.has('horsemanship') && !bk.has('horsemanship')) return false;
     const blockerColors = blocker.card.colors || [];
     const blockerIsArtifact = /\bartifact\b/i.test(blocker.card.typeLine || '');
     // Fear: only artifact and/or black creatures can block it.
@@ -5790,6 +6052,15 @@ export class Game {
   declareBlockers(playerId, blockMap) {
     if (playerId !== this.defender.id || this.step !== 'declareBlockers') return false;
     const p = this.getPlayer(playerId);
+    // Provoke: a provoked creature blocks the provoker if it's able to,
+    // whatever was declared for it.
+    for (const blocker of p.battlefield.filter(x => x.provokedBy)) {
+      const provoker = this.findPermanent(blocker.provokedBy);
+      blocker.provokedBy = null;
+      if (provoker?.attacking && this.canBlockAttacker(blocker, provoker)) {
+        blockMap = [{ blockerId: blocker.id, attackerId: provoker.id }, ...blockMap.filter(b => b.blockerId !== blocker.id)];
+      }
+    }
     const usedBlockers = new Set();
     for (const { blockerId, attackerId } of blockMap) {
       const blocker = p.battlefield.find(x => x.id === blockerId);
@@ -5805,11 +6076,18 @@ export class Game {
     // A lone blocker on a menace attacker is removed (that blocker simply
     // doesn't block, which is what an illegal block declaration amounts to).
     for (const attacker of this.active.battlefield.filter(x => x.attacking)) {
-      if (attacker.blockedBy.length === 1 && this.effectiveKeywords(attacker).has('menace')) {
-        const lone = this.findPermanent(attacker.blockedBy[0]);
-        if (lone) lone.blocking = null;
+      const ar = this.getBlockRestrictions(attacker);
+      const minBlockers = Math.max(ar.minBlockers, this.effectiveKeywords(attacker).has('menace') ? 2 : 1);
+      if (attacker.blockedBy.length > 0 && attacker.blockedBy.length < minBlockers) {
+        for (const id of attacker.blockedBy) { const b = this.findPermanent(id); if (b) b.blocking = null; }
         attacker.blockedBy = [];
-        this.log(`${attacker.card.name} has menace — a single creature can't block it.`);
+        this.log(`${attacker.card.name} can't be blocked except by ${minBlockers} or more creatures.`);
+      }
+      // "Can't be blocked by more than one creature": extra blockers drop out.
+      if (attacker.blockedBy.length > ar.maxBlockers) {
+        for (const id of attacker.blockedBy.slice(ar.maxBlockers)) { const b = this.findPermanent(id); if (b) b.blocking = null; }
+        attacker.blockedBy = attacker.blockedBy.slice(0, ar.maxBlockers);
+        this.log(`${attacker.card.name} can't be blocked by more than ${ar.maxBlockers} creature.`);
       }
     }
     this.applyBlockKeywordTriggers();
@@ -5933,10 +6211,15 @@ export class Game {
       return;
     }
     const defenderPlayer = this.getPlayer(this.opponentOf(attackerPerm.controllerId).id);
-    defenderPlayer.life -= amount;
-    defenderPlayer.damageTakenThisTurn += amount;
+    const kws = this.effectiveKeywords(attackerPerm);
+    this.damagePlayer(defenderPlayer, amount, kws, attackerPerm.card.name);
     if (isCommanderSource) defenderPlayer.commanderDamageTaken += amount;
-    this.log(`${attackerPerm.card.name} deals ${amount} damage to ${defenderPlayer.name}.`);
+    // Toxic N: combat damage to a player also gives N poison counters.
+    const toxic = this.keywordAmount(attackerPerm.card, 'toxic');
+    if (toxic > 0) {
+      defenderPlayer.counters.poison = (defenderPlayer.counters.poison || 0) + toxic;
+      this.log(`Toxic: ${defenderPlayer.name} gets ${toxic} poison counter${toxic > 1 ? 's' : ''} (${defenderPlayer.counters.poison} total).`);
+    }
     this.triggerCombatDamageToPlayer(attackerPerm, amount);
   }
 
@@ -5973,7 +6256,7 @@ export class Game {
           this.log(`${blocker.card.name} has protection — ${attackerPerm.card.name}'s ${assign} damage is prevented.`);
           continue;
         }
-        blocker.damage += assign;
+        this.damageCreature(blocker, assign, kws);
         this.log(`${attackerPerm.card.name} deals ${assign} damage to ${blocker.card.name}.`);
         if (kws.has('lifelink')) this.getPlayer(attackerPerm.controllerId).life += assign;
       }
@@ -5990,8 +6273,16 @@ export class Game {
           this.log(`${attackerPerm.card.name} has protection — ${blocker.card.name}'s damage is prevented.`);
           continue;
         }
+        const blockerKws = this.effectiveKeywords(blocker);
+        if (blockerKws.has('infect') || blockerKws.has('wither')) {
+          // -1/-1 counters, not marked damage — applied directly.
+          this.damageCreature(attackerPerm, this.effectivePower(blocker), blockerKws);
+          if (blockerKws.has('deathtouch') && this.effectivePower(blocker) > 0) blockerHasDeathtouch = true;
+          if (blockerKws.has('lifelink')) this.getPlayer(blocker.controllerId).life += this.effectivePower(blocker);
+          continue;
+        }
         incoming += this.effectivePower(blocker);
-        if (this.effectiveKeywords(blocker).has('deathtouch')) blockerHasDeathtouch = true;
+        if (blockerKws.has('deathtouch')) blockerHasDeathtouch = true;
         if (this.effectiveKeywords(blocker).has('lifelink')) {
           this.getPlayer(blocker.controllerId).life += this.effectivePower(blocker);
         }
@@ -6006,6 +6297,8 @@ export class Game {
     if (this.gameOver) return;
     for (const p of this.players) {
       if (p.life <= 0 && !p.lost) { this.loseGame(p.id, 'life total reached 0'); return; }
+      // Rule 704.5c — poison counters were tracked but never lost a game.
+      if ((p.counters.poison || 0) >= 10 && !p.lost) { this.loseGame(p.id, 'ten or more poison counters'); return; }
     }
     if (this.commanderMode) {
       for (const p of this.players) {
