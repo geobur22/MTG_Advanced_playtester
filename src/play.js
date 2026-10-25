@@ -1338,7 +1338,12 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
     if (modeIndexes === null) return; // cancelled
   }
 
-  const kinds = game.getRequiredTargetKinds(card, modeIndexes);
+  // Optional cast-time costs (Gift, Bargain, Replicate, Squad, Offspring,
+  // Conspire, Casualty) — asked before targets, since a promised gift or a
+  // bargain can change what the spell targets.
+  const extras = altCost ? {} : await chooseCastExtras(card, modeIndexes);
+  if (extras === null) return;
+  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain });
   let xValue = 0;
   const parsed = parseManaCost(card.manaCost);
   if (parsed.x > 0) {
@@ -1371,12 +1376,73 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
   }
 
   if (kinds.length === 0) {
-    game.castSpell(HUMAN_ID, card.instanceId, [], xValue, modeIndexes, kicked, altCost ? { altCost } : {});
+    const result = game.castSpell(HUMAN_ID, card.instanceId, [], xValue, modeIndexes, kicked, { ...(altCost ? { altCost } : {}), extras });
+    if (!result.ok) await showAlert(result.reason);
     return;
   }
 
-  ui.targeting = { card, kinds, collected: [], xValue, modeIndexes, kicked, altCost };
+  ui.targeting = { card, kinds, collected: [], xValue, modeIndexes, kicked, altCost, extras };
   render();
+}
+
+// Asks about each optional cost the card has that's payable right now.
+// Returns the `extras` object for game.castSpell, or null if cancelled.
+async function chooseCastExtras(card, modeIndexes) {
+  const extras = {};
+  let committed = game.getModeExtraCost(card, modeIndexes);
+  const gift = game.getGiftKind(card);
+  if (gift && game.canGiveGift(card)) {
+    const what = gift === 'card' ? 'draws a card' : `gets ${/^[aeiou]/.test(gift) ? 'an' : 'a'} ${gift} token`;
+    extras.gift = await showConfirm(`${card.name} — promise the gift? Your opponent ${what} before the spell's other effects.`);
+  }
+  if (game.hasBargain(card)) {
+    const pick = await pickPermanentFromList(`Bargain ${card.name} by sacrificing an artifact, enchantment, or token?`, game.bargainCandidates(HUMAN_ID));
+    if (pick === undefined) return null;
+    if (pick) extras.bargain = pick.id;
+  }
+  for (const [kind, cost] of [['replicate', game.getReplicateCost(card)], ['squad', game.getSquadCost(card)]]) {
+    if (!cost) continue;
+    const max = game.maxAffordableRepeats(HUMAN_ID, card, cost, committed);
+    if (max === 0) continue;
+    const label = kind === 'replicate' ? `Replicate ${cost}: copy ${card.name} once per payment.` : `Squad ${cost}: a token copy of ${card.name} per payment.`;
+    const input = await showPrompt(`${label}\nHow many times? (0-${max})`, '0');
+    if (input === null) return null;
+    const n = Math.max(0, Math.min(max, parseInt(input, 10) || 0));
+    if (n) { extras[kind] = n; committed += cost.repeat(n); }
+  }
+  const offspring = game.getOffspringCost(card);
+  if (offspring && game.canAffordWithExtra(HUMAN_ID, card, committed + offspring)) {
+    if (await showConfirm(`Pay Offspring ${offspring}? You'll also get a 1/1 token copy of ${card.name}.`)) { extras.offspring = true; committed += offspring; }
+  }
+  if (game.hasConspire(card)) {
+    const tappers = game.conspireCandidates(HUMAN_ID, card);
+    if (tappers.length >= 2 && await showConfirm(`Conspire: tap ${tappers[0].card.name} and ${tappers[1].card.name} to copy ${card.name}?`)) {
+      extras.conspire = [tappers[0].id, tappers[1].id];
+    }
+  }
+  if (game.getCasualtyAmount(card) != null) {
+    const pick = await pickPermanentFromList(`Casualty ${game.getCasualtyAmount(card)}: sacrifice a creature to copy ${card.name}?`, game.casualtyCandidates(HUMAN_ID, card).filter(x => x.id !== extras.bargain));
+    if (pick === undefined) return null;
+    if (pick) extras.casualty = pick.id;
+  }
+  return extras;
+}
+
+// A numbered pick from up to nine permanents (0 = none). Returns the
+// permanent, null for "none", or undefined if cancelled. Skips the prompt
+// when there's nothing to pick.
+async function pickPermanentFromList(question, perms) {
+  if (!perms.length) return null;
+  const shown = perms.slice(0, 9);
+  const list = shown.map((x, i) => `${i + 1}. ${x.card.name}`).join('\n');
+  while (true) {
+    const input = await showPrompt(`${question}\n${list}\n\nEnter a number, or 0 for none:`, '0');
+    if (input === null) return undefined;
+    const i = parseInt(input, 10);
+    if (i === 0 || input.trim() === '') return null;
+    if (i >= 1 && i <= shown.length) return shown[i - 1];
+    await showAlert('Enter one of the listed numbers, or 0.');
+  }
 }
 
 // Modal spells ("Choose one —" text) need their mode(s) picked before
@@ -1384,10 +1450,12 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
 // targets. Returns the chosen 0-based indexes, or null if the player
 // cancelled.
 async function chooseModes(card, modal) {
-  const list = modal.modes.map((m, i) => `${i + 1}. ${m.label}`).join('\n');
-  const countLabel = modal.upTo ? `up to ${modal.count}` : `${modal.count}`;
+  // Spree modes show their own added cost; Escalate notes its per-mode cost.
+  const list = modal.modes.map((m, i) => `${i + 1}. ${m.cost ? `+${m.cost} — ` : ''}${m.label}`).join('\n');
+  const countLabel = modal.upTo ? (modal.count >= modal.modes.length ? 'one or more' : `up to ${modal.count}`) : `${modal.count}`;
   const needed = modal.upTo ? 1 : modal.count;
-  const promptText = `${card.name} — choose ${countLabel} mode(s):\n${list}\n\nEnter the number(s), comma-separated (e.g. "1" or "1,3"):`;
+  const costNote = modal.escalate ? `\nEscalate: each mode beyond the first costs ${modal.escalate === 'discard' ? 'a discarded card' : modal.escalate} more.` : '';
+  const promptText = `${card.name} — choose ${countLabel} mode(s):\n${list}${costNote}\n\nEnter the number(s), comma-separated (e.g. "1" or "1,3"):`;
   while (true) {
     const input = await showPrompt(promptText);
     if (input === null) return null;
@@ -1471,6 +1539,9 @@ function isLegalPermanentTarget(perm) {
   if (kind === 'creatureOrPlayer') return isCreature || game.isPlaneswalker(perm.card);
   if (kind === 'planeswalker' || kind === 'playerOrPlaneswalker') return game.isPlaneswalker(perm.card);
   if (kind === 'permanent') return true;
+  if (kind === 'artifact') return game.isArtifact(perm.card);
+  if (kind === 'enchantment') return game.isEnchantment(perm.card);
+  if (kind === 'land') return game.isLand(perm.card);
   return false;
 }
 
@@ -1521,7 +1592,10 @@ function handleTargetPick(target) {
       else if (t.source === 'commander') game.castCommander(HUMAN_ID, t.collected, t.xValue || 0);
       else if (t.fromExile) game.playCardFromExile(HUMAN_ID, t.fromExile, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null });
       else if (t.fromGraveyard) game.castFromGraveyard(HUMAN_ID, t.fromGraveyard.cardInstanceId, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null, viaEscape: t.fromGraveyard.viaEscape });
-      else game.castSpell(HUMAN_ID, t.card.instanceId, t.collected, t.xValue || 0, t.modeIndexes || null, t.kicked || false, t.altCost ? { altCost: t.altCost } : {});
+      else {
+        const result = game.castSpell(HUMAN_ID, t.card.instanceId, t.collected, t.xValue || 0, t.modeIndexes || null, t.kicked || false, { ...(t.altCost ? { altCost: t.altCost } : {}), extras: t.extras || {} });
+        if (!result.ok) showAlert(result.reason);
+      }
     } else {
       render();
     }

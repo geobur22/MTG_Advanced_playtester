@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -24,6 +24,20 @@ function typeOf(card, kind) {
 
 function isLand(card) { return typeOf(card, 'land'); }
 function isCreature(card) { return typeOf(card, 'creature'); }
+// Tokens are recognized by their type line ("Token Creature — Goblin", set
+// by every token-creating helper) or an explicit isToken flag (token copies
+// of real cards, whose type line is copied from the original).
+function isTokenCard(card) { return !!card && (card.isToken || /\btoken\b/i.test(card.typeLine || '')); }
+// A token that's a copy of `card` (Squad, Offspring's 1/1 copy, a copied
+// permanent spell). stats overrides power/toughness.
+function makeTokenCopyCard(card, stats = null) {
+  return {
+    ...card,
+    id: uid('tokencard'), instanceId: uid('tokeninst'), isToken: true,
+    typeLine: /\btoken\b/i.test(card.typeLine || '') ? card.typeLine : `Token ${card.typeLine || ''}`.trim(),
+    ...(stats ? { power: String(stats.power), toughness: String(stats.toughness) } : {}),
+  };
+}
 function isInstant(card) { return typeOf(card, 'instant'); }
 function isSorcery(card) { return typeOf(card, 'sorcery'); }
 function isAura(card) { return typeOf(card, 'aura'); }
@@ -887,13 +901,18 @@ export class Game {
   // new token starts unattached, same as real rules (equipping it is a
   // separate action).
   applyTokenCopyOfSelfEffect(ctx) {
-    const p = this.getPlayer(ctx.controllerId);
-    const tokenCard = { ...ctx.card, id: uid('tokencard'), instanceId: uid('tokeninst') };
-    const perm = makePermanent(tokenCard, ctx.controllerId);
-    p.battlefield.push(perm);
+    this.createTokenCopy(ctx.card, ctx.controllerId);
     this.log(`${ctx.card.name} creates a token copy of itself.`);
+  }
+
+  // Creates a token copy of a card under controllerId, firing its own ETB
+  // triggers. stats: { power, toughness } override (Offspring's 1/1).
+  createTokenCopy(card, controllerId, stats = null) {
+    const perm = makePermanent(makeTokenCopyCard(card, stats), controllerId);
+    this.getPlayer(controllerId).battlefield.push(perm);
     this.checkStateBasedActions();
     this.triggerETB(perm);
+    return perm;
   }
 
   // "Search your library for an artifact card with mana value X or less,
@@ -1516,19 +1535,23 @@ export class Game {
   // modeIndexes matters only for modal spells (getSpellModes) — different
   // modes can need different targets, so this needs to know which mode(s)
   // were picked to report the right target kinds.
-  getRequiredTargetKinds(card, modeIndexes = null) {
+  // flags: cast-time choices the text can depend on (gift promised,
+  // bargained, kicked — see effects.js's applyCastConditions); Into the
+  // Flood Maw's promised gift widens its target from a creature to any
+  // nonland permanent.
+  getRequiredTargetKinds(card, modeIndexes = null, flags = null) {
     if (isAura(card)) return [isEnchantPlayerAura(card) ? 'player' : 'permanent'];
     if (!isInstant(card) && !isSorcery(card)) return [];
-    return expandTargetKinds(interpretSpell(card, modeIndexes));
+    return expandTargetKinds(interpretSpell(card, modeIndexes, flags));
   }
 
   // Companion to getRequiredTargetKinds — see minRequiredTargetCount's own
   // comment for why ai.js's "is this worth attempting" gates need this
   // instead of getRequiredTargetKinds(...).length.
-  getMinRequiredTargetCount(card, modeIndexes = null) {
+  getMinRequiredTargetCount(card, modeIndexes = null, flags = null) {
     if (isAura(card)) return 1;
     if (!isInstant(card) && !isSorcery(card)) return 0;
-    return minRequiredTargetCount(interpretSpell(card, modeIndexes));
+    return minRequiredTargetCount(interpretSpell(card, modeIndexes, flags));
   }
 
   // Exposes expandTargetKinds/minRequiredTargetCount to ai.js, which only
@@ -1799,7 +1822,7 @@ export class Game {
   // (see getKickerCost) — folded into the mana payment below, and recorded
   // on the resulting permanent as `wasKicked` (see resolveTop) for its own
   // "if it was kicked, ..." ETB trigger to read back.
-  castSpell(playerId, instanceId, targets = [], xValue = 0, modeIndexes = null, kicked = false, { free = false, bypassTiming = false, ownerId = null, costOverride = null, viaSuspend = false, altCost = null } = {}) {
+  castSpell(playerId, instanceId, targets = [], xValue = 0, modeIndexes = null, kicked = false, { free = false, bypassTiming = false, ownerId = null, costOverride = null, viaSuspend = false, altCost = null, extras = {} } = {}) {
     const p = this.getPlayer(playerId);
     const idx = p.hand.findIndex(c => c.instanceId === instanceId);
     if (idx === -1) return { ok: false, reason: 'Card not in hand.' };
@@ -1819,6 +1842,11 @@ export class Game {
     // combine with them.
     let kickerCost = null;
     let phyrexianPaidWithLife = 0;
+    // Optional cast-time costs (Replicate, Squad, Offspring, Conspire,
+    // Casualty, Bargain, Gift, Escalate/Spree modes) — validated before
+    // anything is paid; see resolveCastExtras.
+    const ex = this.resolveCastExtras(playerId, card, modeIndexes, extras, { free });
+    if (ex.error) return { ok: false, reason: ex.error };
     if (!free) {
       // "As an additional cost to cast this spell, pay X life" (Toxic
       // Deluge) — X here is a pure life cost, unrelated to the spell's own
@@ -1843,7 +1871,7 @@ export class Game {
         if (!altInfo) return { ok: false, reason: `Can't cast ${card.name} that way right now.` };
         if (altInfo.emergeVictimId) emergeVictim = this.findPermanent(altInfo.emergeVictimId);
       }
-      const parsed = parseManaCost((altInfo ? altInfo.manaCost : (costOverride ?? card.manaCost)) + (kickerCost || ''));
+      const parsed = parseManaCost((altInfo ? altInfo.manaCost : (costOverride ?? card.manaCost)) + (kickerCost || '') + ex.manaCost);
       parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId) - (emergeVictim ? (emergeVictim.card.cmc || 0) : 0));
       const payment = this.planSpellPayment(playerId, card, parsed, lifePaymentX ? 0 : xValue);
       if (!payment) return { ok: false, reason: 'Not enough mana.' };
@@ -1859,6 +1887,7 @@ export class Game {
       }
     }
     p.hand.splice(idx, 1);
+    this.payCastExtras(playerId, card, ex);
 
     const stackItem = {
       id: uid('stk'),
@@ -1884,6 +1913,10 @@ export class Game {
       entwined: !!kickerCost && !getKickerCost(card) && !getBuybackCost(card) && !!getEntwineCost(card),
       isPermanentSpell: isPermanentType(card) && !isAura(card),
       isAura: isAura(card),
+      bargained: ex.bargained,
+      gift: ex.gift,
+      squadCount: ex.squad,
+      offspring: ex.offspring,
     };
     // Entwine paid: every mode, regardless of which were picked.
     if (stackItem.entwined) {
@@ -1892,12 +1925,228 @@ export class Game {
     }
     this.stack.push(stackItem);
     p.spellsCastThisTurn = (p.spellsCastThisTurn || 0) + 1;
-    this.log(`${p.name} casts ${card.name}${stackItem.altCostKind ? ` (${stackItem.altCostKind})` : ''}${stackItem.kicked ? ' (kicked)' : ''}${stackItem.buyback ? ' (with buyback)' : ''}${stackItem.entwined ? ' (entwined)' : ''}${free ? ' without paying its mana cost' : ''}.`);
+    const extraNotes = [ex.bargained && 'bargained', ex.gift && 'gift promised', ex.squad && `squad x${ex.squad}`, ex.offspring && 'offspring', ex.replicate && `replicated x${ex.replicate}`].filter(Boolean);
+    this.log(`${p.name} casts ${card.name}${stackItem.altCostKind ? ` (${stackItem.altCostKind})` : ''}${stackItem.kicked ? ' (kicked)' : ''}${stackItem.buyback ? ' (with buyback)' : ''}${stackItem.entwined ? ' (entwined)' : ''}${extraNotes.length ? ` (${extraNotes.join(', ')})` : ''}${free ? ' without paying its mana cost' : ''}.`);
     this.triggerCastSpell(playerId, card);
     this.triggerBecomesTarget(targets);
     this.maybeCounterForWard(stackItem);
+    // Replicate/Conspire/Casualty: "when you cast this spell, copy it" —
+    // the copies go on the stack above the original.
+    const copies = ex.replicate + (ex.conspire ? 1 : 0) + (ex.casualty ? 1 : 0);
+    if (copies && this.stack.includes(stackItem)) {
+      const why = [ex.replicate && 'replicate', ex.conspire && 'conspire', ex.casualty && 'casualty'].filter(Boolean).join('/');
+      for (let i = 0; i < copies; i++) this.copySpellOnStack(stackItem, playerId, why);
+    }
     this.afterAction(playerId);
     return { ok: true };
+  }
+
+  // Works out the optional cast-time costs chosen in `extras`, checking
+  // they're legal right now. extras: { replicate: n, squad: n, offspring,
+  // conspire, casualty, bargain, gift } — conspire/casualty/bargain accept
+  // true (pick automatically) or the id(s) of the permanent(s) to use.
+  // Escalate's and Spree's costs come from modeIndexes. Returns the added
+  // mana cost plus what payCastExtras must do, or { error }.
+  resolveCastExtras(playerId, card, modeIndexes, extras = {}, { free = false } = {}) {
+    const p = this.getPlayer(playerId);
+    const ex = { manaCost: '', discards: [], tapIds: [], sacrificeIds: [], replicate: 0, squad: 0, offspring: false, conspire: false, casualty: false, bargained: false, gift: false };
+    if (!free) ex.manaCost += getModeExtraCost(card, modeIndexes);
+    const modal = modeIndexes?.length > 1 ? getSpellModesFromText(card) : null;
+    if (modal?.escalate === 'discard') {
+      const n = modeIndexes.length - 1;
+      const pool = this.discardFodder(p, card).slice(0, n);
+      if (pool.length < n) return { error: `Not enough cards to discard for escalate.` };
+      ex.discards = pool;
+    }
+    const replicateCost = getReplicateCost(card);
+    if (extras.replicate > 0 && replicateCost) { ex.replicate = Math.floor(extras.replicate); if (!free) ex.manaCost += replicateCost.repeat(ex.replicate); }
+    const squadCost = getSquadCost(card);
+    if (extras.squad > 0 && squadCost) { ex.squad = Math.floor(extras.squad); if (!free) ex.manaCost += squadCost.repeat(ex.squad); }
+    const offspringCost = getOffspringCost(card);
+    if (extras.offspring && offspringCost) { ex.offspring = true; if (!free) ex.manaCost += offspringCost; }
+    if (extras.conspire && hasConspire(card)) {
+      const ids = Array.isArray(extras.conspire) ? extras.conspire : this.conspireCandidates(playerId, card).slice(0, 2).map(x => x.id);
+      const legal = new Set(this.conspireCandidates(playerId, card).map(x => x.id));
+      if (ids.length !== 2 || !ids.every(id => legal.has(id))) return { error: 'Conspire needs two untapped creatures that share a color with the spell.' };
+      ex.conspire = true;
+      ex.tapIds.push(...ids);
+    }
+    if (extras.casualty && getCasualtyAmount(card) != null) {
+      const candidates = this.casualtyCandidates(playerId, card);
+      const id = typeof extras.casualty === 'string' ? extras.casualty : candidates[0]?.id;
+      if (!candidates.some(x => x.id === id)) return { error: `Casualty needs a creature with power ${getCasualtyAmount(card)} or greater to sacrifice.` };
+      ex.casualty = true;
+      ex.sacrificeIds.push(id);
+    }
+    if (extras.bargain && hasBargain(card)) {
+      const candidates = this.bargainCandidates(playerId).filter(x => !ex.sacrificeIds.includes(x.id));
+      const id = typeof extras.bargain === 'string' ? extras.bargain : candidates[0]?.id;
+      if (!candidates.some(x => x.id === id)) return { error: 'Bargain needs an artifact, enchantment, or token to sacrifice.' };
+      ex.bargained = true;
+      ex.sacrificeIds.push(id);
+    }
+    if (extras.gift && getGiftKind(card)) {
+      if (!this.canGiveGift(card)) return { error: `This engine can't give "${getGiftKind(card)}" as a gift.` };
+      ex.gift = true;
+    }
+    return ex;
+  }
+
+  // The non-mana half of resolveCastExtras: discards, taps, sacrifices.
+  payCastExtras(playerId, card, ex) {
+    const p = this.getPlayer(playerId);
+    for (const c of ex.discards) {
+      const i = p.hand.indexOf(c);
+      if (i === -1) continue;
+      p.hand.splice(i, 1);
+      p.graveyard.push(c);
+      this.log(`${p.name} discards ${c.name} to escalate ${card.name}.`);
+    }
+    for (const id of ex.tapIds) {
+      const perm = this.findPermanent(id);
+      if (perm) perm.tapped = true;
+    }
+    if (ex.tapIds.length) this.log(`${p.name} taps ${ex.tapIds.map(id => this.findPermanent(id)?.card.name).join(' and ')} to conspire.`);
+    for (const id of ex.sacrificeIds) {
+      const perm = this.findPermanent(id);
+      if (!perm) continue;
+      this.log(`${p.name} sacrifices ${perm.card.name} for ${card.name}'s ${ex.casualty && id === ex.sacrificeIds[0] ? 'casualty' : 'bargain'}.`);
+      this.movePermanentToGraveyard(perm, { sacrifice: true });
+    }
+  }
+
+  // Cards the AI (or an auto-picked escalate cost) is happiest to discard:
+  // surplus lands when it already has plenty, then the cheapest spells.
+  discardFodder(p, exceptCard = null) {
+    const hand = p.hand.filter(c => c !== exceptCard);
+    const landsInPlay = p.battlefield.filter(x => isLand(x.card)).length;
+    return hand.slice().sort((a, b) => {
+      const score = (c) => isLand(c) ? (landsInPlay >= 5 ? -1 : 2) : (c.cmc || 0);
+      return score(a) - score(b);
+    });
+  }
+
+  // Conspire: untapped creatures you control sharing a color with the
+  // spell, weakest first.
+  conspireCandidates(playerId, card) {
+    const colors = new Set(card.colors || []);
+    return this.getPlayer(playerId).battlefield
+      .filter(x => isCreature(x.card) && !x.tapped && (x.card.colors || []).some(c => colors.has(c)))
+      .sort((a, b) => this.effectivePower(a) - this.effectivePower(b));
+  }
+
+  // Casualty N: creatures with power N or greater, tokens and weakest first.
+  casualtyCandidates(playerId, card) {
+    const n = getCasualtyAmount(card) || 0;
+    return this.getPlayer(playerId).battlefield
+      .filter(x => isCreature(x.card) && this.effectivePower(x) >= n)
+      .sort((a, b) => (isTokenCard(b.card) - isTokenCard(a.card)) || (this.effectivePower(a) - this.effectivePower(b)));
+  }
+
+  // Bargain: artifacts, enchantments, or tokens — noncreature tokens
+  // (Treasure, Food, Clue) first, then creature tokens, then real cards.
+  bargainCandidates(playerId) {
+    const rank = (x) => isTokenCard(x.card) ? (isCreature(x.card) ? 1 : 0) : 2;
+    return this.getPlayer(playerId).battlefield
+      .filter(x => isTokenCard(x.card) || isArtifact(x.card) || isEnchantment(x.card))
+      .sort((a, b) => rank(a) - rank(b) || (a.card.cmc || 0) - (b.card.cmc || 0));
+  }
+
+  // Gifts this engine can hand over (an extra turn isn't modeled).
+  canGiveGift(card) {
+    return ['card', 'food', 'tapped fish', 'fish', 'treasure', 'clue', 'octopus'].includes(getGiftKind(card));
+  }
+
+  // "They create a Food token / draw a card / ..." — the promised gift,
+  // given to the opponent before the spell's other effects.
+  deliverGift(card, casterId) {
+    const kind = getGiftKind(card);
+    const opponent = this.opponentOf(casterId);
+    const ctx = { controllerId: opponent.id, card };
+    this.log(`${opponent.name} gets the gift from ${card.name}.`);
+    if (kind === 'card') this.drawCard(opponent);
+    else if (kind === 'food') this.applyFoodTokenEffect(ctx, 1);
+    else if (kind === 'treasure') this.applyTreasureTokenEffect(ctx, 1);
+    else if (kind === 'clue') this.applyClueTokenEffect(ctx, 1);
+    else if (kind === 'octopus') this.applyTokenEffect(ctx, 1, 8, 8, 'blue octopus');
+    else if (kind === 'tapped fish' || kind === 'fish') {
+      this.applyTokenEffect(ctx, 1, 1, 1, 'blue fish');
+      if (kind === 'tapped fish') opponent.battlefield[opponent.battlefield.length - 1].tapped = true;
+    }
+  }
+
+  // Puts a copy of a spell on the stack (Replicate, Conspire, Casualty). A
+  // copy keeps the original's choices (modes, X, kicked/bargained/gift) and
+  // may get new targets: the AI re-picks, avoiding the original's target
+  // where it can; a human is asked when the spell has a single target.
+  // Copies aren't cast (no cast triggers) and cease to exist on resolving.
+  copySpellOnStack(item, controllerId, why = 'copy') {
+    const copy = { ...item, id: uid('stk'), isCopy: true, targets: [...item.targets] };
+    this.stack.push(copy);
+    this.log(`A copy of ${item.card.name} is put on the stack (${why}).`);
+    const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift };
+    const kinds = this.getRequiredTargetKinds(item.card, item.modeIndexes, flags);
+    const permanentKinds = ['creature', 'creatureOrPlayer', 'planeswalker', 'playerOrPlaneswalker', 'permanent', 'player', 'artifact', 'enchantment', 'land'];
+    if (kinds.length && kinds.every(k => permanentKinds.includes(k))) {
+      const controller = this.getPlayer(controllerId);
+      if (controller.isAI) {
+        const avoid = item.targets.find(t => t?.type === 'permanent')?.id || null;
+        const picked = pickTargetsForKinds(this, item.card, controllerId, kinds, avoid);
+        copy.targets = picked.map((t, i) => t || item.targets[i]);
+      } else if (kinds.length === 1) {
+        const current = item.targets[0];
+        const name = (t) => t?.type === 'player' ? this.getPlayer(t.id).name : this.findPermanent(t?.id)?.card.name || 'nothing';
+        const options = [{ label: `Keep the same target (${name(current)})`, resolve: () => {} }];
+        for (const t of this.legalTargetsForKind(kinds[0], controllerId, item.card)) {
+          if (t.type === current?.type && t.id === current?.id) continue;
+          options.push({ label: `Target ${name(t)}`, resolve: () => { if (this.stack.includes(copy)) copy.targets = [t]; } });
+          if (options.length >= 9) break;
+        }
+        if (options.length > 1) this.requestChoice(controllerId, `Choose a new target for the copy of ${item.card.name}?`, options);
+      }
+    }
+    this.triggerBecomesTarget(copy.targets);
+    this.maybeCounterForWard(copy);
+    return copy;
+  }
+
+  // Every legal target of a coarse target kind (see effects.js's
+  // describeTargetKind) for a spell/ability controlled by controllerId.
+  legalTargetsForKind(kind, controllerId, sourceCard = null) {
+    const out = [];
+    if (['player', 'creatureOrPlayer', 'playerOrPlaneswalker'].includes(kind)) {
+      for (const pl of this.players) if (!pl.lost) out.push({ type: 'player', id: pl.id });
+    }
+    for (const pl of this.players) {
+      for (const perm of pl.battlefield) {
+        if (!this.canBeTargetedBy(perm, controllerId, sourceCard)) continue;
+        const ok = kind === 'permanent'
+          || (kind === 'artifact' && isArtifact(perm.card))
+          || (kind === 'enchantment' && isEnchantment(perm.card))
+          || (kind === 'land' && isLand(perm.card))
+          || (kind === 'creature' && isCreature(perm.card))
+          || (kind === 'creatureOrPlayer' && (isCreature(perm.card) || isPlaneswalker(perm.card)))
+          || ((kind === 'planeswalker' || kind === 'playerOrPlaneswalker') && isPlaneswalker(perm.card));
+        if (ok) out.push({ type: 'permanent', id: perm.id });
+      }
+    }
+    return out;
+  }
+
+  // How many times a repeatable optional cost (Replicate, Squad) could be
+  // paid on top of the spell's cost right now — capped, since nothing real
+  // goes past a handful. extraBase: other added costs already committed.
+  maxAffordableRepeats(playerId, card, cost, extraBase = '', cap = 6) {
+    let n = 0;
+    while (n < cap && this.canAffordWithExtra(playerId, card, extraBase + cost.repeat(n + 1))) n++;
+    return n;
+  }
+
+  // Whether the card's cost plus `extra` (a mana string) is payable now.
+  canAffordWithExtra(playerId, card, extra = '') {
+    const parsed = parseManaCost((card.manaCost || '') + extra);
+    parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId));
+    return !!this.planSpellPayment(playerId, card, parsed, 0);
   }
 
   // Removes a just-cast spell from the stack if checkWardAndMaybeCounter
@@ -1907,6 +2156,7 @@ export class Game {
   maybeCounterForWard(stackItem) {
     if (!this.checkWardAndMaybeCounter(stackItem.controllerId, stackItem.targets)) return;
     this.stack = this.stack.filter(s => s.id !== stackItem.id);
+    if (stackItem.isCopy) return;
     // The card's real owner (see castSpell's own `ownerId` option/comment)
     // — almost always the same as the caster, but not for a card like
     // Etali, Primal Storm's own attack trigger casts someone else's.
@@ -2173,11 +2423,20 @@ export class Game {
   resolveTop() {
     const item = this.stack.pop();
     if (!item) return;
-    const { card, controllerId } = item;
+    const { controllerId } = item;
+    // A copy of a permanent spell becomes a token (rule 707.10f).
+    const card = item.isCopy && item.isPermanentSpell ? makeTokenCopyCard(item.card) : item.card;
     const p = this.getPlayer(controllerId);
+    // Gift: the opponent gets it before the spell's other effects (the
+    // original only — a copy doesn't give a second gift).
+    if (item.gift && !item.isCopy) this.deliverGift(card, controllerId);
 
     if (item.isPermanentSpell) {
       const perm = makePermanent(card, controllerId);
+      perm.wasBargained = !!item.bargained;
+      perm.giftPromised = !!item.gift;
+      perm.squadCount = item.squadCount || 0;
+      perm.offspring = !!item.offspring;
       // makePermanent always sets ownerId = controllerId (the overwhelming
       // common case), which is wrong the moment caster and true owner
       // differ (Etali, Primal Storm casting an opponent's exiled
@@ -2295,7 +2554,13 @@ export class Game {
     // castFromGraveyard lets a clause key off "if this spell was cast from
     // a graveyard" (Increasing Confusion's own doubled mill) — set whenever
     // this resolution came from castFromGraveyard's Flashback/Escape path.
-    this.resolveEffectSteps(interpretSpell(card, item.modeIndexes), item.targets, { controllerId, card, xValue: item.xValue, castFromGraveyard: !!(item.viaFlashback || item.viaEscape) });
+    const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift };
+    this.resolveEffectSteps(interpretSpell(card, item.modeIndexes, flags), item.targets, { controllerId, card, xValue: item.xValue, castFromGraveyard: !!(item.viaFlashback || item.viaEscape) });
+    // A copy of a spell ceases to exist instead of going anywhere.
+    if (item.isCopy) {
+      this.checkStateBasedActions();
+      return;
+    }
     // Flashback and Escape both exile an instant/sorcery as it resolves
     // instead of putting it into the graveyard as usual (Flashback's own
     // "then exile it"; Escape's identical real-rules behavior for
@@ -2439,13 +2704,13 @@ export class Game {
 
     const controller = this.getPlayer(perm.controllerId);
     if (controller.isAI) {
-      import('./ai.js').then(({ pickTargetsForKinds }) => {
-        if (this.gameOver || !this.findPermanent(perm.id)) return;
-        const targets = pickTargetsForKinds(this, perm.card, perm.controllerId, kinds, perm.id);
-        this.resolveEffectSteps(steps, targets, ctxBase);
-        this.checkStateBasedActions();
-        this.emit();
-      });
+      // Resolved right away (pickTargetsForKinds is statically imported) —
+      // this used to defer to a later microtask via a dynamic import, so an
+      // AI's ETB targets were chosen after whatever happened next.
+      const targets = pickTargetsForKinds(this, perm.card, perm.controllerId, kinds, perm.id);
+      this.resolveEffectSteps(steps, targets, ctxBase);
+      this.checkStateBasedActions();
+      this.emit();
       return;
     }
 
@@ -2523,6 +2788,44 @@ export class Game {
     const counterOn = (p) => () => {
       if (this.findPermanent(p.id)) this.applyCounterAdditionEffect({ controllerId: p.controllerId, card: p.card, target: { type: 'permanent', id: p.id } }, 1, '+1/+1');
     };
+
+    // Squad: a token copy for each time the squad cost was paid. Offspring:
+    // one 1/1 token copy. (The copies weren't cast with those costs paid,
+    // so they don't make copies of their own.)
+    if (perm.squadCount) {
+      this.log(`${perm.card.name}'s squad creates ${perm.squadCount} token cop${perm.squadCount > 1 ? 'ies' : 'y'}.`);
+      for (let i = 0; i < perm.squadCount; i++) this.createTokenCopy(perm.card, perm.controllerId);
+    }
+    if (perm.offspring) {
+      this.log(`${perm.card.name}'s offspring creates a 1/1 token copy.`);
+      this.createTokenCopy(perm.card, perm.controllerId, { power: 1, toughness: 1 });
+    }
+
+    // Backup N: N +1/+1 counters on target creature; if that's another
+    // creature, it also gains this creature's keyword abilities until end
+    // of turn (Boon-Bringer Valkyrie's flying, first strike, lifelink).
+    // Granted triggered abilities (Guardian Scalelord's attack trigger)
+    // aren't copied over. AI: the strongest other creature that can still
+    // attack this turn, else the best other creature, else itself.
+    const backup = getBackupAmount(perm.card);
+    if (backup) {
+      const granted = (perm.card.keywords || []).map(k => k.toLowerCase()).filter(k => k !== 'backup' && KNOWN_KEYWORDS.includes(k));
+      const backupOnto = (target) => () => {
+        if (!this.findPermanent(target.id)) return;
+        this.applyCounterAdditionEffect({ controllerId: perm.controllerId, card: perm.card, target: { type: 'permanent', id: target.id } }, backup, '+1/+1');
+        if (target.id !== perm.id && granted.length) {
+          target.tempKeywords.push(...granted);
+          this.log(`${target.card.name} gains ${granted.join(', ')} until end of turn (backup).`);
+        }
+      };
+      const others = controller.battlefield.filter(x => x.id !== perm.id && isCreature(x.card))
+        .sort((a, b) => this.effectivePower(b) - this.effectivePower(a));
+      const choices = [...others.slice(0, 7), perm];
+      const canAttack = (x) => !x.tapped && this.canDeclareAsAttacker(x);
+      const aiIdx = Math.max(0, choices.findIndex(x => x !== perm && canAttack(x)));
+      this.requestChoice(perm.controllerId, `${perm.card.name} — Backup ${backup}: put ${backup > 1 ? `${backup} +1/+1 counters` : 'a +1/+1 counter'} on which creature?`,
+        choices.map(x => ({ label: x === perm ? `${x.card.name} (itself)` : x.card.name, resolve: backupOnto(x) })), aiIdx);
+    }
 
     if (kws.has('riot')) {
       // AI: haste when the opponent has no creatures to block, else the counter.
@@ -3649,7 +3952,9 @@ export class Game {
     // graveyard, same "commander replacement effect" already applied
     // everywhere a commander leaves the battlefield (redirectCommanderToZone) —
     // this is the one other zone a commander can leave FROM (the stack).
-    if (this.commanderMode && owner.commander === countered.card) {
+    if (countered.isCopy) {
+      this.log(`${ctx.card.name} counters the copy of ${countered.card.name}.`);
+    } else if (this.commanderMode && owner.commander === countered.card) {
       owner.commanderZone = true;
       this.log(`${ctx.card.name} counters ${countered.card.name}; it returns to ${owner.name}'s command zone instead.`);
     } else {
@@ -4004,13 +4309,13 @@ export class Game {
     }
     const controller = this.getPlayer(perm.controllerId);
     if (controller.isAI) {
-      import('./ai.js').then(({ pickTargetsForKinds }) => {
-        if (this.gameOver || !this.findPermanent(perm.id)) return;
-        const targets = pickTargetsForKinds(this, perm.card, perm.controllerId, kinds, perm.id);
-        this.resolveEffectSteps(steps, targets, ctxBase);
-        this.checkStateBasedActions();
-        this.emit();
-      });
+      // Resolved right away (pickTargetsForKinds is statically imported) —
+      // this used to defer to a later microtask via a dynamic import, so an
+      // AI's ETB targets were chosen after whatever happened next.
+      const targets = pickTargetsForKinds(this, perm.card, perm.controllerId, kinds, perm.id);
+      this.resolveEffectSteps(steps, targets, ctxBase);
+      this.checkStateBasedActions();
+      this.emit();
       return;
     }
     this._pendingETB = { perm, steps, ctxBase };
@@ -4601,6 +4906,67 @@ export class Game {
     const opponent = this.opponentOf(ctx.controllerId);
     this.applyDamageEffect({ ...ctx, target: { type: 'player', id: opponent.id } }, amount);
     this.checkStateBasedActions();
+  }
+
+  // Thoughtseize/Duress-style: the target player reveals their hand and the
+  // caster picks a card matching `filter` ("nonland", "noncreature,
+  // nonland", "instant or sorcery", ...) for them to discard. "nonX" terms
+  // must all hold; plain type terms are alternatives. The AI takes the
+  // priciest match; a human caster picks from buttons.
+  applyRevealDiscardEffect(ctx, filter, maxCmc = null) {
+    if (ctx.target?.type !== 'player') return;
+    const victim = this.getPlayer(ctx.target.id);
+    const terms = filter.toLowerCase().split(/,\s*or\s+|,\s*|\s+or\s+/).map(t => t.trim()).filter(Boolean);
+    const negatives = terms.filter(t => t.startsWith('non')).map(t => t.slice(3).replace(/^-/, ''));
+    const positives = terms.filter(t => !t.startsWith('non') && t !== 'card');
+    const typeLine = (c) => (c.typeLine || '').toLowerCase();
+    const matches = (c) => negatives.every(t => !typeLine(c).includes(t))
+      && (!positives.length || positives.some(t => typeLine(c).includes(t)))
+      && (maxCmc == null || (c.cmc || 0) <= maxCmc);
+    this.log(`${victim.name} reveals their hand: ${victim.hand.map(c => c.name).join(', ') || '(empty)'}.`);
+    const candidates = victim.hand.filter(matches);
+    if (!candidates.length) { this.log(`${ctx.card.name} finds nothing to take.`); return; }
+    const take = (c) => {
+      const i = victim.hand.indexOf(c);
+      if (i === -1) return;
+      victim.hand.splice(i, 1);
+      victim.graveyard.push(c);
+      this.log(`${victim.name} discards ${c.name} (${ctx.card.name}).`);
+    };
+    const sorted = candidates.slice().sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
+    const seen = new Set();
+    const options = sorted.filter(c => !seen.has(c.name) && seen.add(c.name)).map(c => ({ label: `Take ${c.name}`, resolve: () => take(c) }));
+    this.requestChoice(ctx.controllerId, `${ctx.card.name}: choose a card for ${victim.name} to discard`, options, 0);
+  }
+
+  // "Draw two cards, then discard a card" — the controller chooses what to
+  // discard: the AI its least useful cards (discardFodder), a human picks
+  // one at a time from buttons.
+  applyLootDiscard(ctx, amount) {
+    const p = this.getPlayer(ctx.controllerId);
+    const discardOne = (c) => {
+      const i = p.hand.indexOf(c);
+      if (i === -1) return;
+      p.hand.splice(i, 1);
+      p.graveyard.push(c);
+      this.log(`${p.name} discards ${c.name}.`);
+    };
+    if (p.isAI) {
+      for (const c of this.discardFodder(p).slice(0, amount)) discardOne(c);
+      return;
+    }
+    const askOnce = (left) => {
+      if (left <= 0 || p.hand.length === 0) return;
+      const names = new Set();
+      const options = [];
+      for (const c of p.hand) {
+        if (names.has(c.name)) continue;
+        names.add(c.name);
+        options.push({ label: `Discard ${c.name}`, resolve: () => { discardOne(c); askOnce(left - 1); } });
+      }
+      this.requestChoice(p.id, `${ctx.card.name}: discard ${left > 1 ? `${left} cards (one at a time)` : 'a card'}`, options);
+    };
+    askOnce(amount);
   }
 
   // Simplification: picks randomly rather than letting the discarding player choose.
@@ -6046,6 +6412,12 @@ export class Game {
   autoPickTarget(kind, controllerId) {
     const opponent = this.opponentOf(controllerId);
     if (kind === 'player' || kind === 'playerOrPlaneswalker') return { type: 'player', id: opponent.id };
+    if (kind === 'artifact' || kind === 'enchantment' || kind === 'land') {
+      const match = kind === 'artifact' ? isArtifact : kind === 'enchantment' ? isEnchantment : isLand;
+      const best = opponent.battlefield.filter(perm => match(perm.card) && this.canBeTargetedBy(perm, controllerId))
+        .sort((a, b) => (b.card.cmc || 0) - (a.card.cmc || 0))[0];
+      return best ? { type: 'permanent', id: best.id } : null;
+    }
     const enemyCreatures = opponent.battlefield.filter(perm => isCreature(perm.card) && this.canBeTargetedBy(perm, controllerId));
     if (enemyCreatures.length > 0) {
       const best = enemyCreatures.sort((a, b) => this.effectivePower(b) - this.effectivePower(a))[0];
@@ -6402,6 +6774,15 @@ export class Game {
 
   checkStateBasedActions() {
     if (this.gameOver) return;
+    // Rule 704.5d: a token that's left the battlefield (died, bounced,
+    // exiled) ceases to exist. Its "dies" triggers have already fired by
+    // the time this runs; without this, dead tokens piled up in graveyards
+    // where they could be reanimated, delved, or counted.
+    for (const p of this.players) {
+      for (const zone of ['graveyard', 'hand', 'exile', 'library']) {
+        if (p[zone].some(isTokenCard)) p[zone] = p[zone].filter(c => !isTokenCard(c));
+      }
+    }
     for (const p of this.players) {
       if (p.life <= 0 && !p.lost) { this.loseGame(p.id, 'life total reached 0'); return; }
       // Rule 704.5c — poison counters were tracked but never lost a game.
@@ -6464,6 +6845,8 @@ export class Game {
 
   isCreature(card) { return isCreature(card); }
   isLand(card) { return isLand(card); }
+  isArtifact(card) { return isArtifact(card); }
+  isEnchantment(card) { return isEnchantment(card); }
   isAura(card) { return isAura(card); }
   isPlaneswalker(card) { return isPlaneswalker(card); }
   isInstantOrSorcery(card) { return isInstant(card) || isSorcery(card); }
@@ -6478,6 +6861,14 @@ export class Game {
   // item records which one it was, since their payoffs differ.
   getOptionalAdditionalCost(card) { return getKickerCost(card) || getBuybackCost(card) || getEntwineCost(card); }
   getEntwineCost(card) { return getEntwineCost(card); }
+  getReplicateCost(card) { return getReplicateCost(card); }
+  getSquadCost(card) { return getSquadCost(card); }
+  getOffspringCost(card) { return getOffspringCost(card); }
+  getCasualtyAmount(card) { return getCasualtyAmount(card); }
+  hasConspire(card) { return hasConspire(card); }
+  hasBargain(card) { return hasBargain(card); }
+  getGiftKind(card) { return getGiftKind(card); }
+  getModeExtraCost(card, modeIndexes) { return getModeExtraCost(card, modeIndexes); }
 
   // The most life a "pay X life as an additional cost" spell (Toxic
   // Deluge) can reasonably ask for — leaves at least 1, since paying

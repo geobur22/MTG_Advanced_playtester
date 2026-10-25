@@ -57,8 +57,114 @@ function wantsOpponentPermanent(game, card) {
   return /destroy target|exile target|tap target|return target permanent/i.test(card.oracleText || '');
 }
 
+// Treasures and other sacrifice-for-mana sources: if some uncastable,
+// non-X spell in hand becomes castable with k of them, sacrifice exactly k
+// (choosing the colors it needs) and return true so the next action casts
+// it. Simulated by temporarily adding that mana to the pool. Only when
+// nothing is castable already (castWays empty) or the enabled spell costs
+// more than everything that is.
+function crackOneShotManaFor(game, p, castWays) {
+  const sources = [];
+  for (const perm of p.battlefield) {
+    if (perm.tapped) continue;
+    game.getTapAbilities(perm).forEach((a, idx) => {
+      if (a.isManaAbility && a.sacrificeCost && game.canActivateTapAbility(p.id, perm.id, idx)) sources.push({ perm, idx });
+    });
+  }
+  if (!sources.length) return false;
+  const bestCastable = Math.max(0, ...[...castWays.keys()].map(c => c.cmc || 0));
+  const wanted = p.hand
+    .filter(c => !isLand(game, c) && !castWays.has(c) && (c.cmc || 0) > bestCastable && !/\{X\}/i.test(c.manaCost || '') && game.canCastSpell(p.id, c))
+    .sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
+  for (const card of wanted) {
+    const parsed = parseManaCost(card.manaCost || '');
+    const pips = Object.entries(parsed.colors || {}).flatMap(([c, n]) => Array(n).fill(c));
+    for (let k = 1; k <= sources.length; k++) {
+      const colors = Array.from({ length: k }, (_, i) => pips[i] || 'C');
+      const saved = { ...p.manaPool };
+      for (const c of colors) p.manaPool[c] = (p.manaPool[c] || 0) + 1;
+      const ok = game.affordability(p.id, card);
+      p.manaPool = saved;
+      if (!ok) continue;
+      colors.forEach((c, i) => game.activateTapAbility(p.id, sources[i].perm.id, sources[i].idx, [], { chosenColor: c === 'C' ? null : c }));
+      return true;
+    }
+  }
+  return false;
+}
+
+// Which permanents a 'permanent'/'artifact'/'enchantment'/'land' target
+// kind can actually hit — see pickTargetsForKinds.
+function permanentTargetMatcher(game, card, kind) {
+  if (kind === 'artifact') return (p) => game.isArtifact(p.card);
+  if (kind === 'enchantment') return (p) => game.isEnchantment(p.card);
+  if (kind === 'land') return (p) => game.isLand(p.card);
+  const phrase = ((card.oracleText || '').toLowerCase().match(/target ([^.;:]*?)(?:permanent|\.|,|$)/) || [])[1] || '';
+  const named = ['artifact', 'creature', 'enchantment', 'land', 'planeswalker'].filter(t => new RegExp(`(?<!non)\\b${t}\\b`).test(phrase));
+  const nonland = /\bnonland\b/.test(phrase);
+  if (named.length) {
+    return (p) => named.some(t => (t === 'creature' ? isCreature(game, p.card) : (p.card.typeLine || '').toLowerCase().includes(t)));
+  }
+  if (nonland) return (p) => !game.isLand(p.card);
+  if (isAura(game, card)) return (p) => isCreature(game, p.card);
+  return (p) => !game.isLand(p.card);
+}
+
 function pickTargetsFor(game, card, controllerId, modeIndexes = null) {
   return pickTargetsForKinds(game, card, controllerId, game.getRequiredTargetKinds(card, modeIndexes));
+}
+
+// Gift: promise it when what the opponent gets is minor (a Food, a tapped
+// Fish, a Treasure, a Clue) or when the spell punishes not promising —
+// never an 8/8 Octopus or an extra turn, and a card only when the promised
+// version of the spell is actually better.
+function shouldPromiseGift(game, card) {
+  const kind = game.getGiftKind(card);
+  if (!kind || !game.canGiveGift(card)) return false;
+  const text = (card.oracleText || '').toLowerCase();
+  if (/if the gift wasn't promised/.test(text)) return kind !== 'octopus';
+  if (['food', 'tapped fish', 'fish', 'treasure', 'clue'].includes(kind)) return /if the gift was promised/.test(text);
+  return kind === 'card' && /if the gift was promised/.test(text) && !/\bdraw/.test(text.split('if the gift was promised')[0]);
+}
+
+// Tokens worth giving up for a payoff (Bargain, Casualty): any noncreature
+// token, or a creature token with 1 or less power.
+function isTokenFodder(game, perm) {
+  if (!/\btoken\b/i.test(perm.card.typeLine || '')) return false;
+  return !isCreature(game, perm.card) || game.effectivePower(perm) <= 1;
+}
+
+// Optional cast-time costs worth paying (see game.castSpell's `extras`):
+// as many Replicate copies / Squad tokens as the mana allows, Offspring
+// when affordable, Conspire when two creatures sharing a color are free to
+// tap (after combat, or summoning sick), Casualty with a token, Bargain
+// with token fodder, and the gift decided above.
+function chooseCastExtras(game, p, card, modeIndexes, kicked, { gift, bargainFodder }) {
+  const extras = {};
+  let committed = game.getModeExtraCost(card, modeIndexes) + (kicked ? (game.getOptionalAdditionalCost(card) || '') : '');
+  if (gift) extras.gift = true;
+  if (bargainFodder) extras.bargain = bargainFodder.id;
+  const replicate = game.getReplicateCost(card);
+  if (replicate) {
+    const n = game.maxAffordableRepeats(p.id, card, replicate, committed, 4);
+    if (n) { extras.replicate = n; committed += replicate.repeat(n); }
+  }
+  const squad = game.getSquadCost(card);
+  if (squad) {
+    const n = game.maxAffordableRepeats(p.id, card, squad, committed, 3);
+    if (n) { extras.squad = n; committed += squad.repeat(n); }
+  }
+  const offspring = game.getOffspringCost(card);
+  if (offspring && game.canAffordWithExtra(p.id, card, committed + offspring)) { extras.offspring = true; committed += offspring; }
+  if (game.hasConspire(card)) {
+    const tappers = game.conspireCandidates(p.id, card).filter(x => game.step !== 'main1' || !game.canDeclareAsAttacker(x));
+    if (tappers.length >= 2) extras.conspire = tappers.slice(0, 2).map(x => x.id);
+  }
+  if (game.getCasualtyAmount(card) != null) {
+    const victim = game.casualtyCandidates(p.id, card).find(x => /\btoken\b/i.test(x.card.typeLine || '') && x.id !== extras.bargain);
+    if (victim) extras.casualty = victim.id;
+  }
+  return extras;
 }
 
 // For a modal spell, greedily picks mode(s) (in printed order) whose
@@ -163,21 +269,27 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
       }
       continue;
     }
-    if (kind === 'permanent') {
-      const preferOpponent = wantsOpponentPermanent(game, card);
-      const primaryPool = (preferOpponent ? opponent : game.getPlayer(controllerId)).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
-      if (primaryPool.length > 0) {
-        const chosen = primaryPool.sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0];
-        targets.push({ type: 'permanent', id: chosen.id });
-        usedIds.add(chosen.id);
-      } else {
-        // No legal creature in the preferred pool (e.g. a removal aura but
-        // the opponent has no creatures yet) — fall back to the other side
-        // rather than skip a castable spell entirely.
-        const fallbackPool = (preferOpponent ? game.getPlayer(controllerId) : opponent).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
-        if (fallbackPool.length > 0) { targets.push({ type: 'permanent', id: fallbackPool[0].id }); usedIds.add(fallbackPool[0].id); }
-        else targets.push(null);
-      }
+    if (kind === 'permanent' || kind === 'artifact' || kind === 'enchantment' || kind === 'land') {
+      // Which permanents qualify: the kind itself for a single type, or for
+      // a broad 'permanent' kind, whatever types the card's own "target ..."
+      // phrase names ("artifact or enchantment", "nonland permanent") —
+      // creatures only when nothing narrower is named (Auras, "target
+      // permanent" bounce). Creatures rank by power, everything else by
+      // mana value.
+      const matches = permanentTargetMatcher(game, card, kind);
+      const preferOpponent = kind === 'land' || wantsOpponentPermanent(game, card) || kind === 'artifact' || kind === 'enchantment';
+      const rank = (p) => isCreature(game, p.card) ? game.effectivePower(p) + 1 : (p.card.cmc || 0);
+      const poolOf = (pl) => pl.battlefield.filter(p => matches(p) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id)).sort((a, b) => rank(b) - rank(a));
+      const primaryPool = poolOf(preferOpponent ? opponent : game.getPlayer(controllerId));
+      // No legal target in the preferred pool (a removal aura but the
+      // opponent has no creatures yet) — fall back to the other side
+      // rather than skip a castable spell, except for destruction: never
+      // blow up our own artifact/enchantment/land.
+      const harmful = /destroy|exile|sacrifice/i.test(card.oracleText || '') && kind !== 'permanent';
+      const fallbackPool = harmful ? [] : poolOf(preferOpponent ? game.getPlayer(controllerId) : opponent);
+      const chosen = primaryPool[0] || fallbackPool[fallbackPool.length - 1] || null;
+      if (chosen) { targets.push({ type: 'permanent', id: chosen.id }); usedIds.add(chosen.id); }
+      else targets.push(null);
       continue;
     }
     if (kind === 'stackSpell') {
@@ -257,7 +369,10 @@ export function takeAITurnAction(game) {
     for (const perm of p.battlefield) {
       if (perm.tapped || isLand(game, perm.card)) continue;
       game.getTapAbilities(perm).forEach((ability, idx) => {
-        if (ability.isManaAbility && game.canActivateTapAbility(p.id, perm.id, idx)) {
+        // One-shot sources (Treasure's "{T}, Sacrifice this artifact") are
+        // NOT cracked up front — that threw a Treasure away every main
+        // phase whether or not anything got cast. See crackOneShotManaFor.
+        if (ability.isManaAbility && !ability.sacrificeCost && game.canActivateTapAbility(p.id, perm.id, idx)) {
           game.activateTapAbility(p.id, perm.id, idx, [], { silent: true });
         }
       });
@@ -346,6 +461,9 @@ export function takeAITurnAction(game) {
       const way = chooseCastWay(game, p, c);
       if (way) castWays.set(c, way);
     }
+    // Nothing castable from lands and mana rocks alone? Sacrifice just
+    // enough Treasures to cast the biggest spell they'd enable.
+    if (crackOneShotManaFor(game, p, castWays)) return;
     const playable = [...castWays.keys()].sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
     for (const card of playable) {
       const altCost = castWays.get(card).altCost;
@@ -369,7 +487,26 @@ export function takeAITurnAction(game) {
       if (modal && !entwine) {
         modeIndexes = pickModesFor(game, modal, card, p.id);
         if (!modeIndexes) continue; // no satisfiable combination of modes — skip this card
+        // Escalate/Spree: extra modes cost extra — keep only as many as can
+        // be paid for (an escalate discard only when the hand can spare it).
+        if (modal.spree || modal.escalate) {
+          const kept = [];
+          for (const i of modeIndexes) {
+            const next = [...kept, i];
+            if (modal.escalate === 'discard' && next.length > 1 && p.hand.length - 1 < next.length + 1) break;
+            if (!game.canAffordWithExtra(p.id, card, game.getModeExtraCost(card, next))) continue;
+            kept.push(i);
+          }
+          if (!kept.length) continue;
+          modeIndexes = kept;
+        }
       }
+      // Choices made while casting that change what the spell does (and
+      // so what it targets): promise a gift, bargain, kick.
+      const kicked = game.getEntwineCost(card) ? entwine : game.canAffordKicked(p.id, card);
+      const gift = !altCost && shouldPromiseGift(game, card);
+      const bargainFodder = game.hasBargain(card) ? game.bargainCandidates(p.id).find(x => isTokenFodder(game, x)) : null;
+      const flags = { kicked, gift, bargained: !!bargainFodder };
       // An {X} spell cast at a hardcoded X=0 achieves nothing (Comet Storm-
       // style payoffs are the whole point of the card) — spend as much as
       // can actually be afforded instead, and skip the card entirely rather
@@ -390,16 +527,15 @@ export function takeAITurnAction(game) {
         xValue = Math.min(game.getMaxLifePaymentX(p.id), biggestToughness);
         if (xValue === 0) continue; // nothing worth killing, or can't afford to pay for it
       }
-      const kinds = game.getRequiredTargetKinds(card, modeIndexes);
+      const kinds = game.getRequiredTargetKinds(card, modeIndexes, flags);
       const targets = pickTargetsForKinds(game, card, p.id, kinds).filter(Boolean);
-      if (game.getMinRequiredTargetCount(card, modeIndexes) > targets.length) continue; // couldn't find enough legal targets
-      // Opt into Kicker (Territorial Allosaurus, etc.) whenever the extra
-      // cost is affordable — a bot that never pays optional costs would
-      // never actually exercise the payoff half of a Kicker card.
-      // (An Entwine card's optional cost is entwine itself — only paid when
-      // decided above, never just because it happens to be affordable.)
-      const kicked = game.getEntwineCost(card) ? entwine : game.canAffordKicked(p.id, card);
-      const result = game.castSpell(p.id, card.instanceId, targets, xValue, modeIndexes, kicked, altCost ? { altCost } : {});
+      if (game.getMinRequiredTargetCount(card, modeIndexes, flags) > targets.length) continue; // couldn't find enough legal targets
+      // Kicker (decided above) is paid whenever affordable — a bot that never
+      // pays optional costs would never exercise the payoff half of a Kicker
+      // card. (An Entwine card's optional cost is entwine itself — only paid
+      // when decided above, never just because it happens to be affordable.)
+      const extras = altCost ? {} : chooseCastExtras(game, p, card, modeIndexes, kicked, { gift, bargainFodder });
+      const result = game.castSpell(p.id, card.instanceId, targets, xValue, modeIndexes, kicked, { ...(altCost ? { altCost } : {}), extras });
       if (result.ok) return;
     }
 

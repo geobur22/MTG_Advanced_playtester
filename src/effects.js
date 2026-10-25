@@ -462,6 +462,18 @@ function interpretEffectText(text) {
     text = text.slice(0, emblemMatch.index) + text.slice(emblemMatch.index + emblemMatch[0].length);
   }
 
+  // Hand disruption: "Target opponent reveals their hand. You choose a
+  // nonland card from it. That player discards that card." (Thoughtseize,
+  // Duress's "noncreature, nonland", Collective Brutality's "instant or
+  // sorcery", Inquisition of Kozilek's "with mana value 3 or less") — three
+  // sentences, so matched whole before the per-clause split.
+  const revealMatch = text.match(/target (?:player|opponent) reveals (?:their|his or her) hand\. you choose an? ([\w ,-]+?) card(?: with mana value (\d+) or less)? from it(?: with mana value (\d+) or less)?\. (?:that player|they) discards? that card\.?/);
+  if (revealMatch) {
+    const filter = revealMatch[1], cap = revealMatch[2] || revealMatch[3], maxCmc = cap ? parseInt(cap, 10) : null;
+    steps.push({ kind: 'revealDiscard', targeting: 'player', resolve: (game, ctx) => game.applyRevealDiscardEffect(ctx, filter, maxCmc) });
+    text = text.slice(0, revealMatch.index) + text.slice(revealMatch.index + revealMatch[0].length);
+  }
+
   const clauses = text.split(/[.\n]/).map(c => c.trim()).filter(Boolean);
 
   for (let clause of clauses) {
@@ -843,6 +855,62 @@ function interpretEffectText(text) {
         targeting: 'player',
         resolve: (game, ctx) => game.applyDrawEffect(ctx, 1),
       });
+      continue;
+    }
+
+    // "Two target players each draw a card" (Huddle Up).
+    if ((m = clause.match(/^(two|three) target players each draw (a|an|one|two|three|\d+) cards?$/))) {
+      const count = parseAmount(m[1]), amount = parseAmount(m[2]);
+      for (let i = 0; i < count; i++) steps.push({ kind: 'draw', amount, targeting: 'player', resolve: (game, ctx) => game.applyDrawEffect(ctx, amount) });
+      continue;
+    }
+
+    // "Put a +1/+1 counter on each creature target player controls"
+    // (Requisition Raid's third mode).
+    if ((m = clause.match(/^put (a|an|one|two|three|\d+) \+1\/\+1 counters? on each creature target player controls$/))) {
+      const amount = parseAmount(m[1]);
+      steps.push({
+        kind: 'counters',
+        targeting: 'player',
+        resolve: (game, ctx) => {
+          if (ctx.target?.type !== 'player') return;
+          for (const perm of game.getPlayer(ctx.target.id).battlefield.filter(x => game.isCreature(x.card))) {
+            game.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: perm.id } }, amount, '+1/+1');
+          }
+        },
+      });
+      continue;
+    }
+
+    // "If you control another creature named Faerie Miscreant, draw a
+    // card." (self-name already normalized to "this creature").
+    if ((m = clause.match(/^if you control another creature named this creature,?\s*(.+)$/))) {
+      for (const step of interpretEffectText(m[1])) {
+        steps.push({
+          ...step,
+          resolve: (game, ctx) => {
+            const others = game.getPlayer(ctx.controllerId).battlefield.filter(x => x.card.name === ctx.card.name && x.id !== ctx.sourcePerm?.id);
+            if (others.length) step.resolve(game, ctx);
+          },
+        });
+      }
+      continue;
+    }
+
+    // Looting/rummaging: "draw two cards, then discard a card" (Ghastly
+    // Discovery, Kitsa's tap ability) and "discard a card, then draw a
+    // card" — the controller picks what to discard (see applyLootDiscard).
+    // Used to draw and skip the discard entirely.
+    if ((m = clause.match(/^(?:you )?draws? (a|an|one|two|three|four|five|\d+) cards?,? then discards? (a|an|one|two|three|\d+) cards?$/))) {
+      const drawN = parseAmount(m[1]), discardN = parseAmount(m[2]);
+      steps.push({ kind: 'draw', amount: drawN, targeting: 'none', resolve: (game, ctx) => game.applyDrawEffect(ctx, drawN) });
+      steps.push({ kind: 'discard', amount: discardN, targeting: 'none', resolve: (game, ctx) => game.applyLootDiscard(ctx, discardN) });
+      continue;
+    }
+    if ((m = clause.match(/^(?:you )?discards? (a|an|one|two|three|\d+) cards?,? then draws? (a|an|one|two|three|four|\d+) cards?$/))) {
+      const discardN = parseAmount(m[1]), drawN = parseAmount(m[2]);
+      steps.push({ kind: 'discard', amount: discardN, targeting: 'none', resolve: (game, ctx) => game.applyLootDiscard(ctx, discardN) });
+      steps.push({ kind: 'draw', amount: drawN, targeting: 'none', resolve: (game, ctx) => game.applyDrawEffect(ctx, drawN) });
       continue;
     }
 
@@ -2918,26 +2986,99 @@ export function isFullyUnsupported(steps) {
 // mode(s) to use BEFORE casting — see castSpell's modeIndexes — since
 // different modes can need entirely different targets, which has to be
 // known before target collection starts, not after.
+// Also covers "Choose one or more —" (Escalate: `escalate` is the cost per
+// mode beyond the first — a mana string, or 'discard' for "Discard a card")
+// and Spree, whose modes are "+ {cost} — effect" lines, each mode's cost
+// paid on top of the base cost (`cost` on that mode).
 export function getSpellModes(card) {
   const text = card.oracleText || '';
-  const header = text.match(/^choose (one|two|up to two|any number)(?: or both)?\s*—/im);
-  if (!header) return null;
-  const countWord = header[1].toLowerCase();
-  const count = countWord === 'two' ? 2 : 1;
-  const upTo = countWord.startsWith('up to') || countWord === 'any number';
-  const modes = text.split('\n')
-    .map(l => l.trim())
-    .filter(l => l.startsWith('•'))
-    .map(l => {
+  const spree = /^spree\b/im.test(text);
+  const header = text.match(/^choose (one or more|one|two|up to two|any number)(?: or both)?\s*—/im);
+  if (!header && !spree) return null;
+  const countWord = header ? header[1].toLowerCase() : 'one or more';
+  const modes = [];
+  for (const l of text.split('\n').map(s => s.trim())) {
+    if (l.startsWith('•')) {
       const label = l.replace(/^•\s*/, '').trim();
-      return { label, steps: interpretEffectText(label.toLowerCase()) };
-    });
-  return modes.length ? { count, upTo, modes } : null;
+      modes.push({ label, steps: interpretEffectText(label.toLowerCase()) });
+      continue;
+    }
+    const m = spree && l.match(/^\+\s*((?:\{[^}]+\})+)\s*[—-]\s*(.+)$/);
+    if (m) modes.push({ label: m[2].trim(), cost: m[1], steps: interpretEffectText(m[2].trim().toLowerCase()) });
+  }
+  if (!modes.length) return null;
+  const many = countWord === 'one or more' || countWord === 'any number';
+  const count = countWord === 'two' ? 2 : many ? modes.length : 1;
+  const upTo = countWord.startsWith('up to') || many;
+  const esc = text.replace(/\([^()]*\)/g, '').match(/^escalate(?:\s*—\s*|\s+)(.+?)\.?$/im);
+  let escalate = null;
+  const escCost = esc ? esc[1].trim().replace(/\.$/, '') : '';
+  if (esc) escalate = /^(?:\{[^}]+\})+$/.test(escCost) ? escCost : /^discard a card$/i.test(escCost) ? 'discard' : null;
+  // An escalate cost this engine can't pay (rare non-mana, non-discard
+  // shapes) means only the first mode is ever chosen.
+  return { count: esc && !escalate ? 1 : count, upTo, modes, spree, escalate };
+}
+
+// The extra mana a modal spell costs for the chosen modes: Spree's per-mode
+// costs, plus Escalate's mana cost for each mode beyond the first. ('' when
+// nothing extra; a discard-shaped escalate cost is handled by castSpell.)
+export function getModeExtraCost(card, modeIndexes) {
+  const modal = getSpellModes(card);
+  if (!modal || !modeIndexes?.length) return '';
+  let extra = '';
+  if (modal.spree) for (const i of modeIndexes) extra += modal.modes[i]?.cost || '';
+  if (modal.escalate && modal.escalate !== 'discard') extra += modal.escalate.repeat(Math.max(0, modeIndexes.length - 1));
+  return extra;
+}
+
+// Choices made while casting that a spell's own text can depend on:
+// "If this spell was kicked/bargained, ...", "If the gift was (n't)
+// promised, ..." — and the "..., instead EFFECT" form, which replaces the
+// sentence before it (Torch the Tower's 2 damage becoming 3). Rewrites the
+// oracle text so only the version that applies remains, before it's
+// interpreted. flags: { kicked, bargained, gift }.
+const CAST_CONDITIONS = [
+  [/^if (?:this spell|it) was kicked,\s*/i, f => !!f.kicked],
+  [/^if (?:this spell|it) was bargained,\s*/i, f => !!f.bargained],
+  [/^if the gift was promised,\s*/i, f => !!f.gift],
+  [/^if the gift wasn't promised,\s*/i, f => !f.gift],
+];
+export function applyCastConditions(text, flags = {}) {
+  if (!/\bif (?:this spell|it) was (?:kicked|bargained)|\bif the gift (?:was|wasn't) promised/i.test(text)) return text;
+  return text.split('\n').map(line => {
+    const clean = line.replace(/\([^()]*\)/g, '').trim();
+    if (!CAST_CONDITIONS.some(([re]) => (clean.match(/[^.]+\.?/g) || []).some(s => re.test(s.trim())))) return line;
+    const out = [];
+    for (let s of clean.match(/[^.]+\.?/g) || []) {
+      s = s.trim();
+      if (!s) continue;
+      const cond = CAST_CONDITIONS.find(([re]) => re.test(s));
+      if (!cond) { out.push(s); continue; }
+      if (!cond[1](flags)) continue;
+      let body = s.replace(cond[0], '');
+      const instead = /^instead,?\s+/i.test(body) || /,?\s*instead\.?$/i.test(body);
+      body = body.replace(/^instead,?\s+/i, '').replace(/,?\s*instead(?=\.?$)/i, '');
+      if (instead && out.length) {
+        const prev = out.pop();
+        const targetPhrase = prev.match(/\btarget [a-z ]+?(?=[.,]|$| and )/i)?.[0];
+        const subject = prev.match(/^(.+?) deals\b/i)?.[1];
+        if (targetPhrase) body = body.replace(/\bthat (?:permanent|creature|player)\b/i, targetPhrase);
+        if (subject) body = body.replace(/^it deals\b/i, `${subject} deals`);
+      }
+      out.push(/\.$/.test(body) ? body : `${body}.`);
+    }
+    return out.join(' ');
+  }).join('\n');
 }
 
 // modeIndexes selects which mode(s) of a modal spell to resolve (required
 // for modal cards — see getSpellModes; ignored for non-modal ones).
-export function interpretSpell(card, modeIndexes = null) {
+// flags: the cast-time choices applyCastConditions keys off.
+export function interpretSpell(card, modeIndexes = null, flags = null) {
+  if (flags) {
+    const rewritten = applyCastConditions(card.oracleText || '', flags);
+    if (rewritten !== card.oracleText) card = { ...card, oracleText: rewritten };
+  }
   const modal = getSpellModes(card);
   if (modal) {
     const indexes = (modeIndexes && modeIndexes.length) ? modeIndexes : [0];
@@ -2989,14 +3130,20 @@ export function interpretPermanentTriggers(card) {
     const cond = m[2].match(/^if (?:its|this creature's|this permanent's) (prowl|surge|dash|blitz|evoke|spectacle|freerunning|emerge|prototype) cost was paid,?\s*(.+)$/)
       // (\s+ rather than \s*, so the lookahead can't be dodged by backtracking:
       // Territorial Allosaurus's own fight clause has its dedicated pattern.)
-      || m[2].match(/^if it was (kicked),?\s+(?!it fights)(.+)$/);
+      || m[2].match(/^if it was (kicked),?\s+(?!it fights)(.+)$/)
+      // Bargain and Gift on permanents (perm.wasBargained / perm.giftPromised).
+      || m[2].match(/^if (it was bargained|the gift was promised|the gift wasn't promised),?\s+(.+)$/);
     if (cond) {
       const kind = cond[1];
       steps.push(...interpretEffectText(cond[2]).map(step => ({
         ...step,
         resolve: (game, ctx) => {
           const perm = ctx.sourcePerm;
-          const paid = kind === 'kicked' ? perm?.wasKicked : perm?.altCostKind === kind;
+          const paid = kind === 'kicked' ? perm?.wasKicked
+            : kind === 'it was bargained' ? perm?.wasBargained
+            : kind === 'the gift was promised' ? perm?.giftPromised
+            : kind === "the gift wasn't promised" ? !perm?.giftPromised
+            : perm?.altCostKind === kind;
           if (paid) step.resolve(game, ctx);
         },
       })));
@@ -3746,6 +3893,37 @@ export function getEntwineCost(card) {
   return m ? m[1] : null;
 }
 
+// Optional costs paid as a spell is cast (batch 4b). Each returns null when
+// the card doesn't have the keyword.
+// "Replicate {R}" / "Squad {2}" (each payable any number of times) and
+// "Offspring {2}" (once) — the cost string.
+function keywordCost(card, keyword) {
+  const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+  const m = text.match(new RegExp(`^${keyword} ((?:\\{[^}]+\\})+)`, 'im'));
+  return m ? m[1] : null;
+}
+export function getReplicateCost(card) { return keywordCost(card, 'replicate'); }
+export function getSquadCost(card) { return keywordCost(card, 'squad'); }
+export function getOffspringCost(card) { return keywordCost(card, 'offspring'); }
+// "Casualty 2" — the minimum power of the creature to sacrifice.
+export function getCasualtyAmount(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^casualty (\d+)/im);
+  return m ? parseInt(m[1], 10) : null;
+}
+export function hasConspire(card) { return /^conspire\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
+export function hasBargain(card) { return /^bargain\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
+// "Gift a Food" / "Gift a tapped Fish" / "Gift a card" / "Gift an extra
+// turn" — what the opponent gets, lowercased ("food", "tapped fish", ...).
+export function getGiftKind(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^gift an? ([a-z ]+?)\s*$/im);
+  return m ? m[1].toLowerCase() : null;
+}
+// "Backup 1" — the number of +1/+1 counters.
+export function getBackupAmount(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^backup (\d+)/im);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 // Exploit's payoff: "When this creature exploits a creature, EFFECT"
 // (Silumgar Butcher's -3/-3) — the effect steps, or [] if none.
 export function getExploitPayoffSteps(card) {
@@ -4004,7 +4182,12 @@ function escapeRegExp(s) {
 function replaceSelfName(card, text, replacement) {
   const shortName = card.name.split(',')[0].trim();
   const namePattern = new RegExp(`\\b(?:${escapeRegExp(card.name)}|${escapeRegExp(shortName)})\\b`, 'gi');
-  return text.replace(namePattern, replacement);
+  // Also drops ability words and flavor words that front a trigger
+  // ("Grav-cannon — When this creature enters, ...", "Landfall — Whenever
+  // ..."): they have no rules meaning, but every trigger pattern is anchored
+  // at the start of the line, so the trigger used to go unrecognized.
+  return text.replace(namePattern, replacement)
+    .replace(/^[A-Za-z][\w' ,-]*? — (?=(?:when|whenever|at|as)\b)/gim, '');
 }
 
 // "Whenever you sacrifice a permanent/creature/artifact, EFFECT" (Korvold,
@@ -4119,6 +4302,14 @@ function describeTargetKind(phrase) {
   const typeKeywords = ['artifact', 'creature', 'enchantment', 'land', 'planeswalker'];
   if (typeKeywords.filter(t => phrase.includes(t)).length > 1) return 'permanent';
   if (phrase.includes('creature')) return 'creature';
+  // A single noncreature permanent type ("destroy target artifact", Stone
+  // Rain's "target land") — these used to fall through to the
+  // 'creatureOrPlayer' default, so artifact removal could hit a creature
+  // or a player and never found an actual artifact. ("Nonland permanent"
+  // has no standalone "land" word, so it still reaches 'permanent' below.)
+  if (/\bartifact\b/.test(phrase)) return 'artifact';
+  if (/\benchantment\b/.test(phrase)) return 'enchantment';
+  if (/\bland\b/.test(phrase)) return 'land';
   // "Target player or planeswalker" / "target opponent or planeswalker"
   // (Lava Spike, Boros Charm, Bonfire of the Damned) — used to fall into
   // the bare-planeswalker case just below, so these spells could ONLY hit
