@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -1146,6 +1146,7 @@ export class Game {
     if (step === 'upkeep') {
       this.tickSuspended();
       this.tickRebound();
+      this.tickEpic();
       this.triggerPhase(interpretUpkeepTriggers);
       this.triggerEnchantedPlayerUpkeep();
       this.openPriorityWindow();
@@ -1540,6 +1541,9 @@ export class Game {
     if (this.pendingRequest) return false;
     const p = this.getPlayer(playerId);
     if (this.priorityPlayer.id !== playerId) return false;
+    // Split second on the stack; Epic's "for the rest of the game, you
+    // can't cast spells".
+    if (this.splitSecondActive() || p.cantCastSpells) return false;
     if (isLand(card)) return false;
     const instantSpeed = isInstant(card) || /flash/.test((card.keywords || []).join(','));
     if (instantSpeed) return true;
@@ -1848,6 +1852,7 @@ export class Game {
     // cast a card is its own timing permission (real rule 601.3b), not
     // bound by the caster's own normal casting windows.
     if (!bypassTiming && !this.canCastSpell(playerId, card)) return { ok: false, reason: 'Cannot cast that right now.' };
+    if (p.cantCastSpells) return { ok: false, reason: "You can't cast spells for the rest of the game (epic)." };
 
     // `free` (Diluvian Primordial's own "cast ... without paying its mana
     // cost") skips ALL cost logic below entirely — no mana, no Kicker, no
@@ -1946,6 +1951,7 @@ export class Game {
     this.triggerCastSpell(playerId, card);
     this.triggerBecomesTarget(targets);
     this.maybeCounterForWard(stackItem);
+    this.applyCastKeywordTriggers(stackItem, playerId);
     // Replicate/Conspire/Casualty: "when you cast this spell, copy it" —
     // the copies go on the stack above the original.
     const copies = ex.replicate + (ex.conspire ? 1 : 0) + (ex.casualty ? 1 : 0);
@@ -1955,6 +1961,121 @@ export class Game {
     }
     this.afterAction(playerId);
     return { ok: true };
+  }
+
+  // Spells cast this turn by everyone — Storm counts them all.
+  totalSpellsThisTurn() { return this.players.reduce((n, pl) => n + (pl.spellsCastThisTurn || 0), 0); }
+
+  // Whether a spell with split second is on the stack: while it is, no one
+  // can cast spells or activate non-mana abilities.
+  splitSecondActive() { return this.stack.some(item => hasSplitSecond(item.card)); }
+
+  // "When you cast this spell" keywords: Storm (a copy per spell cast
+  // before it this turn), Gravestorm (per permanent put into a graveyard
+  // this turn), Demonstrate (copy it, and the opponent gets a copy too),
+  // Ripple (printed, or granted by Thrumming Stone), and Cascade.
+  applyCastKeywordTriggers(item, playerId) {
+    const card = item.card;
+    const p = this.getPlayer(playerId);
+    if (hasStorm(card)) {
+      const n = this.totalSpellsThisTurn() - 1;
+      if (n > 0) {
+        this.log(`Storm: ${card.name} is copied ${n} time${n > 1 ? 's' : ''}.`);
+        for (let i = 0; i < n; i++) this.copySpellOnStack(item, playerId, 'storm');
+      }
+    }
+    if (hasGravestorm(card)) {
+      const n = this.leftBattlefieldThisTurn.length;
+      if (n > 0) {
+        this.log(`Gravestorm: ${card.name} is copied ${n} time${n > 1 ? 's' : ''}.`);
+        for (let i = 0; i < n; i++) this.copySpellOnStack(item, playerId, 'gravestorm');
+      }
+    }
+    if (hasDemonstrate(card)) {
+      // AI: only when the opponent's copy would find no legal target but
+      // ours would — otherwise it's handing them the same spell.
+      const opp = this.opponentOf(playerId);
+      const kinds = this.getRequiredTargetKinds(card, item.modeIndexes);
+      const min = this.getMinRequiredTargetCount(card, item.modeIndexes);
+      const theirs = pickTargetsForKinds(this, card, opp.id, kinds).filter(Boolean).length;
+      const aiYes = min > 0 && theirs < min;
+      this.requestChoice(playerId, `${card.name} — Demonstrate? (You copy it, and ${opp.name} copies it too.)`, [
+        { label: 'Demonstrate', resolve: () => { this.copySpellOnStack(item, playerId, 'demonstrate'); this.copySpellOnStack(item, opp.id, 'demonstrate'); } },
+        { label: "Don't demonstrate", resolve: () => {} },
+      ], aiYes ? 0 : 1);
+    }
+    const granted = Math.max(0, ...p.battlefield.map(perm => parseInt(((perm.card.oracleText || '').match(/spells you cast have ripple (\d+)/i) || [])[1] || '0', 10)));
+    const ripple = Math.max(getRippleAmount(card), granted);
+    if (ripple > 0 && !item.isCopy) this.applyRipple(p, card, ripple);
+    for (let i = 0; i < getCascadeCount(card); i++) this.applyCascade(p, card);
+  }
+
+  // Cascade: exile from the top until a nonland card with lesser mana
+  // value; it may be cast free; the rest go to the bottom in random order.
+  applyCascade(p, card) {
+    const exiled = [];
+    let hit = null;
+    while (p.library.length) {
+      const c = p.library.shift();
+      exiled.push(c);
+      if (!isLand(c) && (c.cmc || 0) < (card.cmc || 0)) { hit = c; break; }
+    }
+    if (!hit) {
+      p.library.push(...shuffle(exiled));
+      this.log(`${card.name} cascades but finds nothing (${exiled.length} card${exiled.length === 1 ? '' : 's'} put on the bottom).`);
+      return;
+    }
+    this.log(`${card.name} cascades into ${hit.name}.`);
+    const others = exiled.filter(c => c !== hit);
+    this.requestChoice(p.id, `Cascade: cast ${hit.name} without paying its mana cost?`, [
+      { label: `Cast ${hit.name} for free`, resolve: () => {
+        if (!this.castFromOutsideHand(p.id, hit, { free: true, fromZone: 'exile' })) { this.log(`${hit.name} can't be cast right now.`); others.push(hit); }
+        p.library.push(...shuffle(others));
+      } },
+      { label: 'Put it on the bottom', resolve: () => p.library.push(...shuffle(exiled)) },
+    ], 0);
+  }
+
+  // Ripple N: reveal the top N; cards with the same name may be cast free;
+  // the rest go to the bottom.
+  applyRipple(p, card, n) {
+    const revealed = p.library.splice(0, n);
+    if (!revealed.length) return;
+    this.log(`Ripple ${n}: ${p.name} reveals ${revealed.map(c => c.name).join(', ')}.`);
+    const matches = revealed.filter(c => c.name === card.name);
+    p.library.push(...revealed.filter(c => c.name !== card.name));
+    for (const c of matches) {
+      this.requestChoice(p.id, `Ripple: cast ${c.name} for free?`, [
+        { label: `Cast ${c.name} for free`, resolve: () => { if (!this.castFromOutsideHand(p.id, c, { free: true, fromZone: 'other' })) p.library.push(c); } },
+        { label: 'Put it on the bottom', resolve: () => p.library.push(c) },
+      ], 0);
+    }
+  }
+
+  // Cipher / Epic copies, and Cipher's "cast a copy": a copy of `card`
+  // controlled by controllerId, put straight on the stack with auto-picked
+  // targets. `cast` copies count as casting a spell (Cipher); Epic's don't.
+  putCopyOnStack(card, controllerId, { cast = false, why = 'copy' } = {}) {
+    const kinds = this.getRequiredTargetKinds(card);
+    const targets = pickTargetsForKinds(this, card, controllerId, kinds).filter(Boolean);
+    if (this.getMinRequiredTargetCount(card) > targets.length) { this.log(`The copy of ${card.name} has no legal target.`); return null; }
+    const item = { id: uid('stk'), card, controllerId, ownerId: controllerId, targets, xValue: 0, modeIndexes: null, isCopy: true, fromZone: 'other', isPermanentSpell: isPermanentType(card) && !isAura(card), isAura: false };
+    this.stack.push(item);
+    this.log(`${this.getPlayer(controllerId).name} ${cast ? 'casts' : 'puts'} a copy of ${card.name} on the stack (${why}).`);
+    if (cast) {
+      const p = this.getPlayer(controllerId);
+      p.spellsCastThisTurn = (p.spellsCastThisTurn || 0) + 1;
+      this.triggerCastSpell(controllerId, card);
+    }
+    this.triggerBecomesTarget(targets);
+    return item;
+  }
+
+  // Epic: at the beginning of each of your upkeeps, copy each epic spell
+  // you've resolved (except for its epic ability).
+  tickEpic() {
+    const p = this.active;
+    for (const card of p.epicSpells || []) this.putCopyOnStack(card, p.id, { why: 'epic' });
   }
 
   // Works out the optional cast-time costs chosen in `extras`, checking
@@ -2095,7 +2216,7 @@ export class Game {
   // where it can; a human is asked when the spell has a single target.
   // Copies aren't cast (no cast triggers) and cease to exist on resolving.
   copySpellOnStack(item, controllerId, why = 'copy') {
-    const copy = { ...item, id: uid('stk'), isCopy: true, targets: [...item.targets] };
+    const copy = { ...item, id: uid('stk'), isCopy: true, controllerId, targets: [...item.targets] };
     this.stack.push(copy);
     this.log(`A copy of ${item.card.name} is put on the stack (${why}).`);
     const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift };
@@ -2399,6 +2520,8 @@ export class Game {
   // triggerAttacks — this is always about a creature's own controller
   // seeing it connect, never an opponent watching it happen.
   triggerCombatDamageToPlayer(sourcePerm, amount) {
+    // Cipher: cast a copy of each card encoded on this creature.
+    for (const encoded of sourcePerm.encoded || []) this.putCopyOnStack(encoded, sourcePerm.controllerId, { cast: true, why: 'cipher' });
     // Renown N: "when this deals combat damage to a player, if it isn't
     // renowned, put N +1/+1 counters on it and it becomes renowned."
     const renown = this.keywordAmount(sourcePerm.card, 'renown');
@@ -2572,6 +2695,33 @@ export class Game {
     this.resolveEffectSteps(interpretSpell(card, item.modeIndexes, flags), item.targets, { controllerId, card, xValue: item.xValue, castFromGraveyard: !!(item.viaFlashback || item.viaEscape || item.fromZone === 'graveyard') });
     // A copy of a spell ceases to exist instead of going anywhere.
     if (item.isCopy) {
+      this.checkStateBasedActions();
+      return;
+    }
+    // Epic: no more spells for this player, and a copy every upkeep.
+    if (hasEpic(card)) {
+      p.cantCastSpells = true;
+      (p.epicSpells ||= []).push(card);
+      this.log(`${p.name} can't cast spells for the rest of the game (epic); ${card.name} will be copied each upkeep.`);
+    }
+    // Cipher: exile the card encoded on a creature you control; whenever
+    // that creature deals combat damage to a player, cast a copy. AI picks
+    // its most evasive creature (flying/unblockable), then its strongest.
+    const encodeTargets = hasCipher(card) ? p.battlefield.filter(x => isCreature(x.card)) : [];
+    if (encodeTargets.length) {
+      p.exile.push(card);
+      const evasive = (x) => { const k = this.effectiveKeywords(x); return k.has('unblockable') || k.has('flying') || k.has('shadow') || k.has('menace'); };
+      const ranked = encodeTargets.slice().sort((a, b) => (evasive(b) - evasive(a)) || (this.effectivePower(b) - this.effectivePower(a))).slice(0, 7);
+      const encode = (perm) => () => {
+        if (!this.findPermanent(perm.id)) return toGraveyard();
+        (perm.encoded ||= []).push(card);
+        this.log(`${card.name} is encoded on ${perm.card.name}.`);
+      };
+      const toGraveyard = () => { const i = p.exile.indexOf(card); if (i !== -1) { p.exile.splice(i, 1); this.getPlayer(item.ownerId || controllerId).graveyard.push(card); } };
+      this.requestChoice(controllerId, `${card.name} — Cipher: encode it on a creature?`, [
+        ...ranked.map(x => ({ label: `Encode on ${x.card.name}`, resolve: encode(x) })),
+        { label: "Don't encode", resolve: toGraveyard },
+      ], 0);
       this.checkStateBasedActions();
       return;
     }
@@ -2944,6 +3094,7 @@ export class Game {
     if (isCreature(perm.card) && perm.summoningSick && !this.effectiveKeywords(perm).has('haste')) return false;
     const ability = this.getTapAbilities(perm)[abilityIndex];
     if (!ability) return false;
+    if (!ability.isManaAbility && this.splitSecondActive()) return false;
     if (ability.sorcerySpeedOnly && !(playerId === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
     // Arrest/Faith's Fetters-style "its activated abilities can't be
     // activated [unless they're mana abilities]" restriction.
@@ -3044,6 +3195,7 @@ export class Game {
     if (!perm || perm.controllerId !== playerId) return false;
     const ability = this.getNonTapAbilities(perm)[abilityIndex];
     if (!ability) return false;
+    if (!ability.isManaAbility && this.splitSecondActive()) return false;
     const restrictionKws = this.effectiveKeywords(perm);
     if (restrictionKws.has('cantActivateAbilities')) return false;
     if (restrictionKws.has('cantActivateNonManaAbilities') && !ability.isManaAbility) return false;
@@ -3176,7 +3328,7 @@ export class Game {
   }
 
   canActivateGraveyardAbility(playerId, cardInstanceId) {
-    if (this.gameOver || this.pendingRequest) return false;
+    if (this.gameOver || this.pendingRequest || this.splitSecondActive()) return false;
     if (this.priorityPlayer.id !== playerId) return false;
     const p = this.getPlayer(playerId);
     const card = p.graveyard.find(c => c.instanceId === cardInstanceId);
@@ -3275,7 +3427,7 @@ export class Game {
   getCyclingAbility(card) { return getCyclingAbility(card); }
 
   canCycle(playerId, instanceId) {
-    if (this.gameOver || this.pendingRequest) return false;
+    if (this.gameOver || this.pendingRequest || this.splitSecondActive()) return false;
     if (this.priorityPlayer.id !== playerId) return false;
     const p = this.getPlayer(playerId);
     const card = p.hand.find(c => c.instanceId === instanceId);
@@ -5304,6 +5456,7 @@ export class Game {
     // Foretold/plotted/warped cards: only on a later turn; plotted ones
     // only at sorcery speed.
     if (entry.notOnTurn === this.turnNumber) return false;
+    if (!isLand(card) && (this.splitSecondActive() || p.cantCastSpells)) return false;
     if (entry.sorceryOnly && !(p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
     if (isLand(card)) return this.canPlayLand(playerId);
     if (!this.canCastSpell(playerId, card)) return false;
@@ -5328,7 +5481,8 @@ export class Game {
   // other cards for Escape, a card/land to discard for Jump-start/Retrace,
   // discarded this turn for Mayhem), at legal timing, and affordable.
   getGraveyardCastWays(playerId, cardInstanceId) {
-    if (this.pendingRequest || this.priorityPlayer.id !== playerId) return [];
+    if (this.pendingRequest || this.priorityPlayer.id !== playerId || this.splitSecondActive()) return [];
+    if (this.getPlayer(playerId).cantCastSpells) return [];
     const p = this.getPlayer(playerId);
     const card = p.graveyard.find(c => c.instanceId === cardInstanceId);
     if (!card) return [];

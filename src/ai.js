@@ -478,7 +478,10 @@ export function takeAITurnAction(game) {
     // Nothing castable from lands and mana rocks alone? Sacrifice just
     // enough Treasures to cast the biggest spell they'd enable.
     if (crackOneShotManaFor(game, p, castWays)) return;
-    const playable = [...castWays.keys()].sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
+    // Storm spells go last, after everything else that can be cast this
+    // turn has raised the count.
+    const isStorm = (c) => /^(?:storm|gravestorm)\b/im.test((c.oracleText || '').replace(/\([^()]*\)/g, ''));
+    const playable = [...castWays.keys()].sort((a, b) => (isStorm(a) - isStorm(b)) || ((b.cmc || 0) - (a.cmc || 0)));
     for (const card of playable) {
       const altCost = castWays.get(card).altCost;
       // Bloodthirst only pays off once the opponent has been dealt damage

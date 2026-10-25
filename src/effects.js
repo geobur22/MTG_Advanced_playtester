@@ -3975,6 +3975,25 @@ export function getDredgeAmount(card) {
 }
 export function hasRebound(card) { return /^rebound\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
 
+// Cast-trigger and stack keywords (batch 6), read off their own lines with
+// reminder text stripped. keywordLineCount counts repeats (a card with
+// cascade twice cascades twice).
+function keywordLineCount(card, keyword) {
+  return ((card.oracleText || '').replace(/\([^()]*\)/g, '').match(new RegExp(`^${keyword}\\b`, 'gim')) || []).length;
+}
+export function getCascadeCount(card) { return keywordLineCount(card, 'cascade'); }
+export function hasStorm(card) { return keywordLineCount(card, 'storm') > 0; }
+export function hasGravestorm(card) { return keywordLineCount(card, 'gravestorm') > 0; }
+export function hasSplitSecond(card) { return keywordLineCount(card, 'split second') > 0; }
+export function hasCipher(card) { return keywordLineCount(card, 'cipher') > 0; }
+export function hasEpic(card) { return keywordLineCount(card, 'epic') > 0; }
+export function hasDemonstrate(card) { return keywordLineCount(card, 'demonstrate') > 0; }
+// "Ripple 4" — N, or 0.
+export function getRippleAmount(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^ripple (\d+)/im);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 // Optional costs paid as a spell is cast (batch 4b). Each returns null when
 // the card doesn't have the keyword.
 // "Replicate {R}" / "Squad {2}" (each payable any number of times) and
