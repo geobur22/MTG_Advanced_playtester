@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -718,6 +718,20 @@ export class Game {
   // from every path that actually removes a permanent from a battlefield
   // (graveyard, exile, bounce), alongside detachFromLeavingBattlefield.
   triggerLeavesBattlefield(perm) {
+    // Champion: the championed card returns when this leaves.
+    if (perm.championed) {
+      const { card: returning, ownerId } = perm.championed;
+      perm.championed = null;
+      const owner = this.getPlayer(ownerId);
+      const i = owner.exile.indexOf(returning);
+      if (i !== -1) {
+        owner.exile.splice(i, 1);
+        const back = makePermanent(returning, ownerId);
+        owner.battlefield.push(back);
+        this.log(`${returning.name} returns to the battlefield (${perm.card.name} left).`);
+        this.triggerETB(back);
+      }
+    }
     const steps = interpretLeavesTriggers(perm.card);
     if (steps.length === 0) return;
     this.resolveEffectSteps(steps, [], { controllerId: perm.controllerId, card: perm.card, sourcePerm: perm });
@@ -833,6 +847,23 @@ export class Game {
   // control" (Detention Sphere's own leaves-the-battlefield trigger) —
   // plural sibling of applyReturnExiledCardEffect, reading back everything
   // tracked by applyExileWithSameNameEffect.
+  // Same bookkeeping, but the cards go to their owners' hands.
+  applyReturnExiledCardsToHandEffect(ctx) {
+    const src = ctx.sourcePerm;
+    if (!src) return;
+    const list = src.exiledCards?.length ? src.exiledCards : (src.exiledCard ? [{ card: src.exiledCard, ownerId: src.exiledCardOwnerId }] : []);
+    for (const { card, ownerId } of list) {
+      const owner = this.getPlayer(ownerId);
+      const idx = owner.exile.indexOf(card);
+      if (idx === -1) continue;
+      owner.exile.splice(idx, 1);
+      owner.hand.push(card);
+      this.log(`${card.name} returns to ${owner.name}'s hand.`);
+    }
+    src.exiledCards = [];
+    src.exiledCard = null;
+  }
+
   applyReturnExiledCardsEffect(ctx) {
     const exiledCards = ctx.sourcePerm?.exiledCards;
     if (!exiledCards || exiledCards.length === 0) return;
@@ -1138,7 +1169,7 @@ export class Game {
       // "This turn" is a shared, global concept (only one turn happens at a
       // time) — a new turn beginning resets it for BOTH players, not just
       // whoever's turn it now is.
-      for (const pl of this.players) { pl.damageTakenThisTurn = 0; pl.cardsDrawnThisTurn = 0; pl.spellsCastThisTurn = 0; pl.lifeAtTurnStart = pl.life; pl.combatDamagerTypesThisTurn = []; pl.discardedThisTurn = []; }
+      for (const pl of this.players) { pl.damageTakenThisTurn = 0; pl.cardsDrawnThisTurn = 0; pl.spellsCastThisTurn = 0; pl.lifeAtTurnStart = pl.life; pl.combatDamagerTypesThisTurn = []; pl.discardedThisTurn = []; for (const perm of pl.battlefield) { perm.attackedThisTurn = false; perm.boastedThisTurn = false; } pl.forecastThisTurn = false; }
       this.leftBattlefieldThisTurn = [];
       this.advanceStep();
       return;
@@ -1147,6 +1178,7 @@ export class Game {
       this.tickSuspended();
       this.tickRebound();
       this.tickEpic();
+      this.tickUpkeepKeywords();
       this.triggerPhase(interpretUpkeepTriggers);
       this.triggerEnchantedPlayerUpkeep();
       this.openPriorityWindow();
@@ -1861,6 +1893,7 @@ export class Game {
     // combine with them.
     let kickerCost = null;
     let phyrexianPaidWithLife = 0;
+    let sunburstColors = 0;
     // Optional cast-time costs (Replicate, Squad, Offspring, Conspire,
     // Casualty, Bargain, Gift, Escalate/Spree modes) — validated before
     // anything is paid; see resolveCastExtras.
@@ -1896,6 +1929,7 @@ export class Game {
       if (!payment) return { ok: false, reason: 'Not enough mana.' };
       this.applySpellPayment(playerId, card, payment);
       phyrexianPaidWithLife = payment.phyrexianPaidWithLife;
+      if (/^sunburst\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, ''))) sunburstColors = this.colorsSpent(payment, parsed);
       if (emergeVictim) {
         this.log(`${p.name} sacrifices ${emergeVictim.card.name} to emerge ${card.name}.`);
         this.movePermanentToGraveyard(emergeVictim, { sacrifice: true });
@@ -1938,6 +1972,7 @@ export class Game {
       fromZone,
       squadCount: ex.squad,
       offspring: ex.offspring,
+      sunburstColors,
     };
     // Entwine paid: every mode, regardless of which were picked.
     if (stackItem.entwined) {
@@ -2408,6 +2443,7 @@ export class Game {
   // runs, unlike an Aura (which would have gone to the graveyard itself
   // instead of surviving to watch).
   triggerDies(diedPerm, previouslyAttachedIds = new Set()) {
+    this.applyDiesKeywords(diedPerm);
     this._diesCascadeDepth = (this._diesCascadeDepth || 0) + 1;
     if (this._diesCascadeDepth > Game.TRIGGER_CASCADE_DEPTH_CAP) {
       this.log(`Death-trigger cascade got ${Game.TRIGGER_CASCADE_DEPTH_CAP} deep — stopping here rather than risking a runaway chain.`);
@@ -2633,15 +2669,23 @@ export class Game {
         this.log(`${card.name}'s bloodthirst is satisfied.`);
         this.applyCounterAdditionEffect({ controllerId, card, target: { type: 'permanent', id: perm.id } }, bloodthirst, '+1/+1');
       }
+      this.applyEntryCounterKeywords(perm, item);
       this.checkStateBasedActions();
-      this.triggerETB(perm, item.xValue || 0);
+      // Tribute: the opponent decides before the creature's ETB triggers
+      // (which may check "if tribute wasn't paid") resolve.
+      const tribute = this.keywordAmount(card, 'tribute');
+      if (tribute > 0) this.offerTribute(perm, tribute, () => this.triggerETB(perm, item.xValue || 0));
+      else this.triggerETB(perm, item.xValue || 0);
       // Evoke: "when it enters, sacrifice it" — after its own ETB triggers
       // (Mulldrifter still draws its two cards).
       if (perm.altCostKind === 'evoke' && this.findPermanent(perm.id)) {
         this.log(`${card.name} was evoked and is sacrificed.`);
         this.movePermanentToGraveyard(perm, { sacrifice: true });
       }
-      if (isSaga(card)) this.advanceSaga(perm);
+      if (isSaga(card)) {
+        if (hasReadAhead(card)) this.chooseReadAheadChapter(perm);
+        else this.advanceSaga(perm);
+      }
       return;
     }
 
@@ -2950,6 +2994,9 @@ export class Game {
   // Unleash (counter, but then it can't block), Exploit (may sacrifice a
   // creature for a payoff), and Evolve on OTHER creatures you control.
   triggerEntryKeywords(perm) {
+    this.applyHideaway(perm);
+    const championType = getChampionType(perm.card);
+    if (championType) this.offerChampion(perm, championType);
     if (!isCreature(perm.card)) return;
     const kws = this.effectiveKeywords(perm);
     const controller = this.getPlayer(perm.controllerId);
@@ -3095,6 +3142,7 @@ export class Game {
     const ability = this.getTapAbilities(perm)[abilityIndex];
     if (!ability) return false;
     if (!ability.isManaAbility && this.splitSecondActive()) return false;
+    if (!this.abilityUseAllowed(perm, ability)) return false;
     if (ability.sorcerySpeedOnly && !(playerId === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
     // Arrest/Faith's Fetters-style "its activated abilities can't be
     // activated [unless they're mana abilities]" restriction.
@@ -3132,6 +3180,7 @@ export class Game {
       for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
     }
     perm.tapped = true;
+    this.markAbilityUsed(perm, ability);
     if (ability.payLife) p.life -= ability.payLife;
     if (ability.sacrificeCost) this.movePermanentToGraveyard(perm, { sacrifice: true });
     this.log(`${p.name} activates ${perm.card.name}'s ability${ability.manaCost ? ` (${ability.manaCost})` : ''}${ability.payLife ? `, paying ${ability.payLife} life` : ''}${ability.sacrificeCost ? ', sacrificing it' : ''}.`);
@@ -3196,6 +3245,7 @@ export class Game {
     const ability = this.getNonTapAbilities(perm)[abilityIndex];
     if (!ability) return false;
     if (!ability.isManaAbility && this.splitSecondActive()) return false;
+    if (!this.abilityUseAllowed(perm, ability)) return false;
     const restrictionKws = this.effectiveKeywords(perm);
     if (restrictionKws.has('cantActivateAbilities')) return false;
     if (restrictionKws.has('cantActivateNonManaAbilities') && !ability.isManaAbility) return false;
@@ -3225,6 +3275,7 @@ export class Game {
       for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
     }
 
+    this.markAbilityUsed(perm, ability);
     let sacrificedName = null;
     if (ability.sacrifice) {
       const toSac = this.findSacrificeFodder(playerId, perm, ability.sacrifice);
@@ -3562,6 +3613,337 @@ export class Game {
       }
     }
   }
+
+  // ---------- Batch 7: counters, upkeep costs, and other timing keywords ----------
+
+  // Colors of mana spent on a payment (Sunburst), counted the way a player
+  // would maximize them: colored pips and pool mana count their colors,
+  // single-color lands theirs, and each multicolor land adds a color not
+  // already counted if it can.
+  colorsSpent(payment, parsed) {
+    const colors = new Set(['W', 'U', 'B', 'R', 'G'].filter(c => (parsed.colors[c] || 0) > 0));
+    for (const c of ['W', 'U', 'B', 'R', 'G']) if ((payment.poolUsed?.[c] || 0) > 0) colors.add(c);
+    const lands = (payment.lands || []).map(l => (l.card.producedMana || []).filter(c => c !== 'C'));
+    for (const prod of lands.filter(x => x.length === 1)) colors.add(prod[0]);
+    for (const prod of lands.filter(x => x.length > 1)) { const fresh = prod.find(c => !colors.has(c)); if (fresh) colors.add(fresh); }
+    return colors.size;
+  }
+
+  // "Enters with" keyword counters, applied before state-based actions so a
+  // 0/0 (Arcbound Worker, a sunburst creature) survives: Modular, Vanishing,
+  // Fading, Sunburst, Amplify, and Devour (a choice).
+  applyEntryCounterKeywords(perm, item) {
+    const card = perm.card;
+    const ctx = { controllerId: perm.controllerId, card, target: { type: 'permanent', id: perm.id } };
+    const p = this.getPlayer(perm.controllerId);
+    const modular = this.keywordAmount(card, 'modular');
+    if (modular) this.applyCounterAdditionEffect(ctx, modular, '+1/+1');
+    const vanishing = this.keywordAmount(card, 'vanishing');
+    if (vanishing) perm.counters.time = (perm.counters.time || 0) + vanishing;
+    const fading = this.keywordAmount(card, 'fading');
+    if (fading) perm.counters.fade = (perm.counters.fade || 0) + fading;
+    if (item?.sunburstColors) {
+      if (isCreature(card)) this.applyCounterAdditionEffect(ctx, item.sunburstColors, '+1/+1');
+      else perm.counters.charge = (perm.counters.charge || 0) + item.sunburstColors;
+      this.log(`${card.name} enters with ${item.sunburstColors} ${isCreature(card) ? '+1/+1' : 'charge'} counter${item.sunburstColors === 1 ? '' : 's'} (sunburst).`);
+    }
+    // Amplify N: reveal any number of cards in hand sharing a creature type
+    // with it — always all of them (revealing costs nothing here).
+    const amplify = this.keywordAmount(card, 'amplify');
+    if (amplify) {
+      const revealed = p.hand.filter(c => this.sharesCreatureType(c, card));
+      if (revealed.length) {
+        this.log(`${p.name} reveals ${revealed.map(c => c.name).join(', ')} (amplify).`);
+        this.applyCounterAdditionEffect(ctx, amplify * revealed.length, '+1/+1');
+      }
+    }
+    // Devour N: sacrifice any number of other creatures; N counters each.
+    // AI devours its creature tokens with 1 or less power.
+    const devour = this.keywordAmount(card, 'devour');
+    if (devour) {
+      const others = p.battlefield.filter(x => x.id !== perm.id && isCreature(x.card));
+      const fodder = others.filter(x => isTokenCard(x.card) && this.effectivePower(x) <= 1);
+      const eat = (victims) => () => {
+        const live = victims.filter(v => this.findPermanent(v.id));
+        if (!live.length) return;
+        this.log(`${card.name} devours ${live.map(v => v.card.name).join(', ')}.`);
+        for (const v of live) this.movePermanentToGraveyard(v, { sacrifice: true });
+        if (this.findPermanent(perm.id)) this.applyCounterAdditionEffect(ctx, devour * live.length, '+1/+1');
+      };
+      const options = [{ label: "Don't devour", resolve: () => {} }];
+      if (fodder.length) options.push({ label: `Devour your small tokens (${fodder.length})`, resolve: eat(fodder) });
+      if (others.length) options.push({ label: `Devour every other creature you control (${others.length})`, resolve: eat(others) });
+      if (others.length) this.requestChoice(p.id, `${card.name} — Devour ${devour}`, options, fodder.length ? 1 : 0);
+    }
+  }
+
+  sharesCreatureType(a, b) {
+    const sub = (c) => ((c.typeLine || '').split('—')[1] || '').toLowerCase().split(/\s+/).filter(Boolean);
+    if (!/creature/i.test(a.typeLine || '')) return false;
+    if ((a.keywords || []).includes('changeling') || /\bchangeling\b/i.test(a.oracleText || '')) return true;
+    const bs = new Set(sub(b));
+    return sub(a).some(t => bs.has(t));
+  }
+
+  // Tribute N: an opponent may put N +1/+1 counters on it; its ETB
+  // triggers (some checking "if tribute wasn't paid") run after the choice.
+  // The AI pays when the unpaid bonus would hurt it (damage, removal, card
+  // draw, life loss, tokens), and otherwise lets it be.
+  offerTribute(perm, n, then) {
+    const opp = this.opponentOf(perm.controllerId);
+    const text = (perm.card.oracleText || '').toLowerCase();
+    const unpaid = (text.match(/if tribute wasn't paid,([^.]*)/) || [])[1] || '';
+    const aiPays = /damage|destroy|draw|loses?|exile|sacrifice|create/.test(unpaid);
+    this.requestChoice(opp.id, `${perm.card.name} — Tribute ${n}: put ${n} +1/+1 counter${n > 1 ? 's' : ''} on it?`, [
+      { label: `Pay tribute (${n} +1/+1 counter${n > 1 ? 's' : ''})`, resolve: () => {
+        perm.tributePaid = true;
+        this.log(`${opp.name} pays tribute.`);
+        if (this.findPermanent(perm.id)) this.applyCounterAdditionEffect({ controllerId: perm.controllerId, card: perm.card, target: { type: 'permanent', id: perm.id } }, n, '+1/+1');
+        then();
+      } },
+      { label: "Don't pay tribute", resolve: () => { perm.tributePaid = false; this.log(`${opp.name} doesn't pay tribute.`); then(); } },
+    ], aiPays ? 0 : 1);
+  }
+
+  // Read ahead: choose the starting chapter; earlier chapters don't trigger.
+  // The AI starts at chapter I.
+  chooseReadAheadChapter(perm) {
+    const chapters = interpretSagaChapters(perm.card);
+    const max = Math.max(1, ...chapters.flatMap(c => c.numbers));
+    const roman = ['I', 'II', 'III', 'IV', 'V', 'VI'];
+    this.requestChoice(perm.controllerId, `${perm.card.name} — Read ahead: start at which chapter?`,
+      Array.from({ length: max }, (_, i) => ({ label: `Chapter ${roman[i] || i + 1}`, resolve: () => {
+        if (!this.findPermanent(perm.id)) return;
+        perm.counters.lore = i;
+        this.advanceSaga(perm);
+      } })), 0);
+  }
+
+  // Upkeep: Vanishing (remove a time counter; sacrifice when the last
+  // goes), Fading (remove a fade counter; sacrifice if you can't), and
+  // Cumulative upkeep (add an age counter, then pay for each or sacrifice).
+  // AI pays cumulative upkeep while it's cheap (mana it has spare, or life
+  // it can afford).
+  tickUpkeepKeywords() {
+    const p = this.active;
+    for (const perm of [...p.battlefield]) {
+      const card = perm.card;
+      if (this.keywordAmount(card, 'vanishing') && perm.counters.time > 0) {
+        perm.counters.time -= 1;
+        if (perm.counters.time === 0) {
+          this.log(`${card.name}'s last time counter is removed — it's sacrificed (vanishing).`);
+          this.movePermanentToGraveyard(perm, { sacrifice: true });
+          continue;
+        }
+      }
+      if (this.keywordAmount(card, 'fading')) {
+        if ((perm.counters.fade || 0) > 0) perm.counters.fade -= 1;
+        else {
+          this.log(`${card.name} has no fade counters left — it's sacrificed (fading).`);
+          this.movePermanentToGraveyard(perm, { sacrifice: true });
+          continue;
+        }
+      }
+      const cu = getCumulativeUpkeep(card);
+      if (cu) {
+        perm.counters.age = (perm.counters.age || 0) + 1;
+        const age = perm.counters.age;
+        const sacrifice = () => { if (this.findPermanent(perm.id)) { this.log(`${p.name} doesn't pay ${card.name}'s cumulative upkeep — it's sacrificed.`); this.movePermanentToGraveyard(perm, { sacrifice: true }); } };
+        if (cu.unsupported) { sacrifice(); continue; }
+        const manaTotal = cu.mana ? cu.mana.repeat(age) : '';
+        const canPay = cu.mana ? this.payableNow(p.id, manaTotal) : p.life > cu.life * age;
+        const pay = () => {
+          if (!this.findPermanent(perm.id)) return;
+          if (cu.mana ? !this.payNow(p.id, manaTotal) : p.life <= cu.life * age) return sacrifice();
+          if (cu.life) p.life -= cu.life * age;
+          this.log(`${p.name} pays ${cu.mana ? manaTotal : `${cu.life * age} life`} for ${card.name}'s cumulative upkeep.`);
+        };
+        const aiPays = canPay && (cu.mana ? totalCmc(parseManaCost(manaTotal)) <= 3 : p.life - cu.life * age >= 10);
+        this.requestChoice(p.id, `${card.name} — Cumulative upkeep (${age} age counter${age > 1 ? 's' : ''})`, [
+          { label: `Pay ${cu.mana ? manaTotal : `${cu.life * age} life`}`, resolve: pay },
+          { label: `Sacrifice ${card.name}`, resolve: sacrifice },
+        ], aiPays ? 0 : 1);
+      }
+    }
+    // AI forecasts during its own upkeep (see forecast below).
+    if (p.isAI) {
+      for (const card of [...p.hand]) if (this.canForecast(p.id, card.instanceId)) { this.forecast(p.id, card.instanceId); break; }
+    }
+  }
+
+  // Dies: Modular (move its +1/+1 counters onto an artifact creature you
+  // control — the AI's best) and Soulshift N (return a Spirit card with
+  // mana value N or less from your graveyard to hand — the priciest).
+  applyDiesKeywords(diedPerm) {
+    const card = diedPerm.card;
+    const controller = this.getPlayer(diedPerm.controllerId);
+    const counters = diedPerm.counters?.['+1/+1'] || 0;
+    if (this.keywordAmount(card, 'modular') && counters > 0) {
+      const targets = controller.battlefield.filter(x => x.id !== diedPerm.id && isCreature(x.card) && isArtifact(x.card) && this.canBeTargetedBy(x, controller.id, card))
+        .sort((a, b) => this.effectivePower(b) - this.effectivePower(a)).slice(0, 7);
+      if (targets.length) {
+        this.requestChoice(controller.id, `${card.name} died — Modular: move its ${counters} +1/+1 counter${counters > 1 ? 's' : ''}?`, [
+          ...targets.map(x => ({ label: `Onto ${x.card.name}`, resolve: () => { if (this.findPermanent(x.id)) { this.log(`${card.name}'s modular counters move onto ${x.card.name}.`); this.applyCounterAdditionEffect({ controllerId: controller.id, card, target: { type: 'permanent', id: x.id } }, counters, '+1/+1'); } } })),
+          { label: "Don't move them", resolve: () => {} },
+        ], 0);
+      }
+    }
+    const soulshift = this.keywordAmount(card, 'soulshift');
+    if (soulshift) {
+      const owner = this.getPlayer(diedPerm.ownerId);
+      const pick = owner.graveyard.filter(c => c !== card && /\bspirit\b/i.test(c.typeLine || '') && (c.cmc || 0) <= soulshift).sort((a, b) => (b.cmc || 0) - (a.cmc || 0))[0];
+      if (pick) {
+        owner.graveyard.splice(owner.graveyard.indexOf(pick), 1);
+        owner.hand.push(pick);
+        this.log(`${card.name}'s soulshift returns ${pick.name} to ${owner.name}'s hand.`);
+      }
+    }
+  }
+
+  // Champion a [type]: when it enters, sacrifice it unless you exile
+  // another [type] you control; that card returns when this leaves. AI
+  // champions its weakest nontoken creature of the type (a token would
+  // simply cease to exist), else a token, else sacrifices.
+  offerChampion(perm, type) {
+    const p = this.getPlayer(perm.controllerId);
+    const fits = (x) => x.id !== perm.id && (type === 'creature' ? isCreature(x.card) : (x.card.typeLine || '').toLowerCase().includes(type) || (isCreature(x.card) && /\bchangeling\b/i.test(x.card.oracleText || '')));
+    const candidates = p.battlefield.filter(fits).sort((a, b) => (isTokenCard(a.card) - isTokenCard(b.card)) || (this.effectivePower(a) - this.effectivePower(b)));
+    const sacrifice = () => { if (this.findPermanent(perm.id)) { this.log(`${perm.card.name} is sacrificed (nothing championed).`); this.movePermanentToGraveyard(perm, { sacrifice: true }); } };
+    if (!candidates.length) { sacrifice(); return; }
+    const champion = (x) => () => {
+      if (!this.findPermanent(perm.id) || !this.findPermanent(x.id)) return sacrifice();
+      const owner = this.getPlayer(x.ownerId);
+      this.getPlayer(x.controllerId).battlefield = this.getPlayer(x.controllerId).battlefield.filter(y => y.id !== x.id);
+      this.detachFromLeavingBattlefield(x);
+      this.triggerLeavesBattlefield(x);
+      if (!isTokenCard(x.card)) { owner.exile.push(x.card); perm.championed = { card: x.card, ownerId: x.ownerId }; }
+      this.log(`${perm.card.name} champions ${x.card.name}.`);
+    };
+    this.requestChoice(p.id, `${perm.card.name} — Champion a ${type}`, [
+      ...candidates.slice(0, 7).map(x => ({ label: `Exile ${x.card.name}`, resolve: champion(x) })),
+      { label: `Sacrifice ${perm.card.name} instead`, resolve: sacrifice },
+    ], 0);
+  }
+
+  // Hideaway N: when it enters, look at the top N cards, exile one face
+  // down (the AI's priciest nonland), put the rest on the bottom.
+  applyHideaway(perm) {
+    const n = this.keywordAmount(perm.card, 'hideaway');
+    if (!n) return;
+    const p = this.getPlayer(perm.controllerId);
+    const looked = p.library.splice(0, n);
+    if (!looked.length) return;
+    const finish = (pick) => () => {
+      perm.hideaway = pick;
+      p.exile.push(pick);
+      p.library.push(...shuffle(looked.filter(c => c !== pick)));
+      this.log(`${p.name} exiles a card face down with ${perm.card.name} (hideaway).`);
+    };
+    const ranked = looked.slice().sort((a, b) => (isLand(a) - isLand(b)) || ((b.cmc || 0) - (a.cmc || 0)));
+    this.requestChoice(p.id, `${perm.card.name} — Hideaway: exile which card?`, ranked.map(c => ({ label: c.name, resolve: finish(c) })), 0);
+  }
+
+  // A hideaway land's payoff — play the exiled card free if the condition
+  // holds. Conditions understood: total power N or greater, attacked with N
+  // or more creatures this turn, a library with N or fewer cards, each
+  // player having N or fewer cards in hand; anything else counts as unmet.
+  applyHideawayPlay(ctx, condition) {
+    const perm = ctx.sourcePerm;
+    const p = this.getPlayer(ctx.controllerId);
+    const card = perm?.hideaway;
+    if (!card || !p.exile.includes(card)) { this.log(`${ctx.card.name} has no hidden card.`); return; }
+    const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, ten: 10, twenty: 20 };
+    const num = (t) => words[t] ?? parseInt(t, 10);
+    let ok = !condition;
+    let m;
+    if (condition) {
+      if ((m = condition.match(/creatures you control have total power (\w+) or greater/))) ok = p.battlefield.filter(x => isCreature(x.card)).reduce((a, x) => a + this.effectivePower(x), 0) >= num(m[1]);
+      else if ((m = condition.match(/you attacked with (\w+) or more creatures this turn/))) ok = p.battlefield.filter(x => x.attackedThisTurn).length >= num(m[1]);
+      else if ((m = condition.match(/a library has (\w+) or fewer cards in it/))) ok = this.players.some(pl => pl.library.length <= num(m[1]));
+      else if ((m = condition.match(/each player has (\w+) or fewer cards in hand/))) ok = this.players.every(pl => pl.hand.length <= num(m[1]));
+    }
+    if (!ok) { this.log(`${ctx.card.name}'s condition isn't met — the hidden card stays exiled.`); return; }
+    p.exile.splice(p.exile.indexOf(card), 1);
+    perm.hideaway = null;
+    if (isLand(card)) {
+      const land = makePermanent(card, p.id);
+      p.battlefield.push(land);
+      this.log(`${p.name} plays ${card.name} from hideaway.`);
+      this.triggerETB(land);
+    } else if (!this.castFromOutsideHand(p.id, card, { free: true, fromZone: 'exile' })) {
+      p.exile.push(card);
+      perm.hideaway = card;
+      this.log(`${card.name} can't be cast right now.`);
+    } else this.log(`${p.name} casts ${card.name} from hideaway for free.`);
+  }
+
+  // Exhaust abilities work once per permanent; Boast abilities only if the
+  // creature attacked this turn, once per turn.
+  abilityUseAllowed(perm, ability) {
+    if (ability.exhaust && (perm.exhaustUsed || []).includes(ability.effectText)) return false;
+    if (ability.boast && (!perm.attackedThisTurn || perm.boastedThisTurn)) return false;
+    return true;
+  }
+
+  markAbilityUsed(perm, ability) {
+    if (ability.exhaust) (perm.exhaustUsed ||= []).push(ability.effectText);
+    if (ability.boast) perm.boastedThisTurn = true;
+  }
+
+  // Forecast: reveal from hand during your upkeep, once per turn, pay the
+  // cost, get the effect (targets auto-picked). Reinforce N: pay the cost,
+  // discard the card, put N +1/+1 counters on target creature.
+  canForecast(playerId, instanceId) {
+    const p = this.getPlayer(playerId);
+    if (this.gameOver || this.pendingRequest || this.step !== 'upkeep' || this.active.id !== playerId || p.forecastThisTurn || this.splitSecondActive()) return false;
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    const fc = card && getForecast(card);
+    if (!fc || !this.payableNow(playerId, fc.manaCost)) return false;
+    return minRequiredTargetCount(fc.steps) <= pickTargetsForKinds(this, card, playerId, expandTargetKinds(fc.steps)).filter(Boolean).length;
+  }
+
+  forecast(playerId, instanceId) {
+    if (!this.canForecast(playerId, instanceId)) return { ok: false, reason: "Can't forecast that right now." };
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    const fc = getForecast(card);
+    this.payNow(playerId, fc.manaCost);
+    p.forecastThisTurn = true;
+    this.log(`${p.name} reveals ${card.name} (forecast).`);
+    const targets = pickTargetsForKinds(this, card, playerId, expandTargetKinds(fc.steps)).filter(Boolean);
+    this.resolveEffectSteps(fc.steps, targets, { controllerId: playerId, card });
+    this.checkStateBasedActions();
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  canReinforce(playerId, instanceId) {
+    if (this.gameOver || this.pendingRequest || this.priorityPlayer.id !== playerId || this.splitSecondActive()) return false;
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    const rf = card && getReinforce(card);
+    return !!(rf && rf.amount !== 'x' && this.payableNow(playerId, rf.manaCost) && this.players.some(pl => pl.battlefield.some(x => isCreature(x.card) && this.canBeTargetedBy(x, playerId, card))));
+  }
+
+  reinforce(playerId, instanceId, targetPermId) {
+    if (!this.canReinforce(playerId, instanceId)) return { ok: false, reason: "Can't reinforce right now." };
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    const target = this.findPermanent(targetPermId);
+    if (!target || !isCreature(target.card)) return { ok: false, reason: 'Reinforce needs a target creature.' };
+    const rf = getReinforce(card);
+    this.payNow(playerId, rf.manaCost);
+    this.log(`${p.name} reinforces ${target.card.name} with ${card.name}.`);
+    this.discardCard(p, card);
+    if (!this.checkWardAndMaybeCounter(playerId, [{ type: 'permanent', id: target.id }])) {
+      this.applyCounterAdditionEffect({ controllerId: playerId, card, target: { type: 'permanent', id: target.id } }, rf.amount, '+1/+1');
+    }
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  getForecast(card) { return getForecast(card); }
+  getReinforce(card) { return getReinforce(card); }
 
   // ---------- Rebound ----------
   // At the beginning of your upkeep, each card you rebounded may be cast
@@ -6909,6 +7291,7 @@ export class Game {
       if (!perm || !isCreature(perm.card) || perm.tapped || !this.canDeclareAsAttacker(perm)) continue;
       const kws = this.effectiveKeywords(perm);
       perm.attacking = true;
+      perm.attackedThisTurn = true;
       if (!kws.has('vigilance')) perm.tapped = true;
       const pwId = attackTargets[id];
       const pw = pwId ? opponent.battlefield.find(x => x.id === pwId && isPlaneswalker(x.card)) : null;

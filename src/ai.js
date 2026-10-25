@@ -681,6 +681,19 @@ export function takeAITurnAction(game) {
       }
     }
 
+    // Reinforce: a spare land (with plenty already in play) or a creature
+    // card too expensive to cast soon becomes +1/+1 counters on our best
+    // creature.
+    {
+      const lands = p.battlefield.filter(perm => isLand(game, perm.card)).length;
+      const best = p.battlefield.filter(perm => isCreature(game, perm.card)).sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0];
+      for (const card of best ? p.hand : []) {
+        if (!game.getReinforce(card) || !game.canReinforce(p.id, card.instanceId)) continue;
+        const spare = isLand(game, card) ? lands >= 5 : (card.cmc || 0) > lands + 2;
+        if (spare && game.reinforce(p.id, card.instanceId, best.id).ok) return;
+      }
+    }
+
     // Cycle away dead cards with mana left over after everything above: a
     // cycling land once there's plenty of mana already, or a spell still far
     // too expensive to cast any time soon. Landcyclers are kept for the

@@ -1270,6 +1270,19 @@ function handCardAlternatives(card) {
       options.push({ label: opt.label, execute: () => handleHandCardClick(card, { skipCycleChoice: true, altCost: { kind: opt.kind, emergeVictimId: opt.emergeVictimId } }) });
     }
   }
+  const forecast = game.getForecast(card);
+  if (forecast && game.canForecast(HUMAN_ID, card.instanceId)) {
+    options.push({ label: `Forecast ${forecast.manaCost}: ${forecast.effectText}`, execute: () => game.forecast(HUMAN_ID, card.instanceId) });
+  }
+  const reinforce = game.getReinforce(card);
+  if (reinforce && game.canReinforce(HUMAN_ID, card.instanceId)) {
+    options.push({ label: `Reinforce ${reinforce.amount} — ${reinforce.manaCost}`, execute: async () => {
+      const creatures = game.players.flatMap(pl => pl.battlefield.filter(x => game.isCreature(x.card)));
+      creatures.sort((a, b) => (b.controllerId === HUMAN_ID) - (a.controllerId === HUMAN_ID));
+      const pick = await pickPermanentFromList(`Reinforce: put ${reinforce.amount} +1/+1 counter${reinforce.amount > 1 ? 's' : ''} on which creature?`, creatures);
+      if (pick) { const r = game.reinforce(HUMAN_ID, card.instanceId, pick.id); if (!r.ok) showAlert(r.reason); }
+    } });
+  }
   const foretell = game.getForetellCost(card);
   if (foretell && game.canForetell(HUMAN_ID, card.instanceId)) {
     options.push({ label: `Foretell (pay {2}; cast later for ${foretell})`, execute: () => game.foretell(HUMAN_ID, card.instanceId) });

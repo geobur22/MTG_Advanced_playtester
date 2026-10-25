@@ -588,7 +588,7 @@ function interpretEffectText(text) {
       continue;
     }
 
-    if ((m = clause.match(/deals? (\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty) damage to (target [\w\s',-]+|any target|each opponent|each creature|you)(?: and (?:you )?(?:draws? (a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+) cards?|gains? (\d+) life))?/))) {
+    if ((m = clause.match(/deals? (\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty) damage to (target [\w\s',-]+|any target|each creature and each opponent|each opponent|each creature|you)(?: and (?:you )?(?:draws? (a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+) cards?|gains? (\d+) life))?/))) {
       const amountToken = m[1];
       const amount = parseAmount(amountToken);
       const targetDesc = m[2];
@@ -604,7 +604,7 @@ function interpretEffectText(text) {
       // "you" (Midnight Reaper's damage target, and similar self-inflicted-
       // damage payoffs) always means the controller of whatever's dealing
       // the damage — never a real target choice.
-      const sweep = targetDesc === 'each creature' ? 'creature' : (targetDesc === 'each opponent' ? 'opponent' : (targetDesc === 'you' ? 'self' : null));
+      const sweep = targetDesc === 'each creature and each opponent' ? 'creatureAndOpponent' : targetDesc === 'each creature' ? 'creature' : (targetDesc === 'each opponent' ? 'opponent' : (targetDesc === 'you' ? 'self' : null));
       steps.push({
         kind: 'damage',
         amount,
@@ -614,7 +614,7 @@ function interpretEffectText(text) {
           const amt = resolveAmount(amountToken, ctx);
           if (sweep === 'self') {
             game.applyDamageEffect({ ...ctx, target: { type: 'player', id: ctx.controllerId } }, amt);
-          } else if (sweep === 'creature') {
+          } else if (sweep === 'creature' || sweep === 'creatureAndOpponent') {
             // A board-wipe-shaped sweep (Blasphemous Act, Star of
             // Extinction, ...) — every creature on either side takes it,
             // resolved as a batch of single-target hits so lifelink/
@@ -625,6 +625,7 @@ function interpretEffectText(text) {
                 if (game.isCreature(perm.card)) game.applyDamageEffect({ ...ctx, target: { type: 'permanent', id: perm.id } }, amt);
               }
             }
+            if (sweep === 'creatureAndOpponent') game.applyDamageEffect({ ...ctx, target: { type: 'player', id: game.opponentOf(ctx.controllerId).id } }, amt);
             game.checkStateBasedActions();
           } else if (sweep === 'opponent') {
             // Only ever a single opponent — this engine is 2-player only.
@@ -888,6 +889,14 @@ function interpretEffectText(text) {
     if ((m = clause.match(/^if you do,? discard (a|an|one|two|three|\d+) cards?$/))) {
       const amount = parseAmount(m[1]);
       steps.push({ kind: 'discard', amount, targeting: 'none', resolve: (game, ctx) => game.applyLootDiscard(ctx, amount) });
+      continue;
+    }
+
+    // Hideaway lands' payoff: "You may play the exiled card without paying
+    // its mana cost if <condition>." (see game.js's applyHideawayPlay).
+    if ((m = clause.match(/^(?:you may )?play the exiled card without paying its mana cost(?: if (.+))?$/))) {
+      const condition = m[1] || null;
+      steps.push({ kind: 'hideawayPlay', targeting: 'none', resolve: (game, ctx) => game.applyHideawayPlay(ctx, condition) });
       continue;
     }
 
@@ -1180,13 +1189,21 @@ function interpretEffectText(text) {
     // turn" — common in "whenever you cast ~" triggers (prowess-style
     // effects). Needs no player-chosen target: the source permanent buffs
     // itself, via ctx.sourcePerm (set by triggerCastSpell/triggerETB).
+    // Also a trailing "and gains haste until end of turn" (Fanatic of
+    // Xenagos's unpaid-tribute bonus), which used to be dropped.
     if ((m = clause.match(/this (?:creature|permanent) gets ([+-]\d+)\/([+-]\d+)/))) {
       const p = parseInt(m[1], 10), t = parseInt(m[2], 10);
+      const gains = (clause.match(/\band gains? ([a-z ,]+?) until end of turn/) || [])[1];
+      const keywords = gains ? gains.split(/,\s*(?:and\s+)?|\s+and\s+/).map(w => w.trim()).filter(Boolean) : [];
       steps.push({
         kind: 'pump',
         power: p, toughness: t,
         targeting: 'none',
-        resolve: (game, ctx) => game.applyPumpEffect({ ...ctx, target: { type: 'permanent', id: ctx.sourcePerm?.id } }, p, t),
+        resolve: (game, ctx) => {
+          const target = { type: 'permanent', id: ctx.sourcePerm?.id };
+          game.applyPumpEffect({ ...ctx, target }, p, t);
+          for (const kw of keywords) game.applyTempKeyword({ ...ctx, target }, kw);
+        },
       });
       continue;
     }
@@ -2131,6 +2148,12 @@ function interpretEffectText(text) {
     // "return the exiled cards to the battlefield under their owner's
     // control") — pairs with applyExileWithSameNameEffect's
     // ctx.sourcePerm.exiledCards list rather than the singular exiledCard.
+    // "Return the exiled card(s) to their owner's/owners' hand(s)" (Angel
+    // of Serenity's leaves trigger).
+    if (/^return the exiled cards? to (?:its|their) owners?'? hands?$/.test(clause)) {
+      steps.push({ kind: 'returnExiled', targeting: 'none', resolve: (game, ctx) => game.applyReturnExiledCardsToHandEffect(ctx) });
+      continue;
+    }
     if (/^return the exiled cards to the battlefield under their owner'?s control/.test(clause)) {
       steps.push({
         kind: 'returnExiledCard',
@@ -2251,13 +2274,15 @@ function interpretEffectText(text) {
     // restricted to the caster's OWN graveyard and sometimes CMC-capped.
     // Same "no real which-card UI" simplification as the untargeted
     // versions: auto-picks the highest-CMC qualifying card.
-    if ((m = clause.match(/^return target (creature|permanent) card(?: with mana value (\d+) or less)? from your graveyard to the battlefield$/))) {
-      const typeWord = m[1];
-      const maxCmc = m[2] ? parseInt(m[2], 10) : Infinity;
+    // (Also "up to N target creature cards" — Proclamation of Rebirth.)
+    if ((m = clause.match(/^return (?:up to (two|three|four|\d+) )?target (creature|permanent) cards?(?: with mana value (\d+) or less)? from your graveyard to the battlefield$/))) {
+      const count = m[1] ? parseAmount(m[1]) : 1;
+      const typeWord = m[2];
+      const maxCmc = m[3] ? parseInt(m[3], 10) : Infinity;
       steps.push({
         kind: 'reanimate',
         targeting: 'none',
-        resolve: (game, ctx) => game.applyReanimateFromOwnGraveyardEffect(ctx, { typeWord, maxCmc }),
+        resolve: (game, ctx) => { for (let i = 0; i < count; i++) game.applyReanimateFromOwnGraveyardEffect(ctx, { typeWord, maxCmc }); },
       });
       continue;
     }
@@ -3155,7 +3180,7 @@ export function interpretPermanentTriggers(card) {
     // choice rather than a real triggered ability in the comprehensive
     // rules, but functionally the same "do this the moment it enters"
     // dispatch point for this engine's purposes.
-    const m = line.match(/^(?:as|when(?:ever)?)\s+(.+?)\s+enters(?: the battlefield)?(?:\s+or\s+(?:attacks|becomes monstrous))?,\s*(.+)$/);
+    const m = line.match(/^(?:as|when(?:ever)?)\s+(.+?)\s+enters(?: the battlefield)?(?:\s+or\s+(?:attacks|becomes monstrous|leaves the battlefield))?,\s*(.+)$/);
     if (!m) continue;
     if (/\banother\b/.test(m[1])) continue; // triggers off other permanents entering — not modeled
     // "If its prowl/surge/... cost was paid, EFFECT" (Latchkey Faerie,
@@ -3167,10 +3192,10 @@ export function interpretPermanentTriggers(card) {
       // Territorial Allosaurus's own fight clause has its dedicated pattern.)
       || m[2].match(/^if it was (kicked),?\s+(?!it fights)(.+)$/)
       // Bargain and Gift on permanents (perm.wasBargained / perm.giftPromised).
-      || m[2].match(/^if (it was bargained|the gift was promised|the gift wasn't promised),?\s+(.+)$/);
+      || m[2].match(/^if (it was bargained|the gift was promised|the gift wasn't promised|tribute wasn't paid|tribute was paid),?\s+(.+)$/);
     if (cond) {
       const kind = cond[1];
-      steps.push(...interpretEffectText(cond[2]).map(step => ({
+      steps.push(...interpretEffectText(cond[2].replace(/^it (?=gets|gains|deals|fights)/, 'this creature ')).map(step => ({
         ...step,
         resolve: (game, ctx) => {
           const perm = ctx.sourcePerm;
@@ -3178,6 +3203,8 @@ export function interpretPermanentTriggers(card) {
             : kind === 'it was bargained' ? perm?.wasBargained
             : kind === 'the gift was promised' ? perm?.giftPromised
             : kind === "the gift wasn't promised" ? !perm?.giftPromised
+            : kind === "tribute wasn't paid" ? !perm?.tributePaid
+            : kind === 'tribute was paid' ? !!perm?.tributePaid
             : perm?.altCostKind === kind;
           if (paid) step.resolve(game, ctx);
         },
@@ -3267,7 +3294,9 @@ export function interpretTapAbilities(card) {
     const manaCost = bracketed.filter(sym => sym.toUpperCase() !== '{T}' && isPayableManaSymbol(sym)).join('');
     const effectText = m[2];
     const steps = interpretEffectText(effectText.toLowerCase());
-    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), sacrificeCost, payLife, manaCost, sorcerySpeedOnly: isSorcerySpeedOnlyLine(line) });
+    // Exhaust (once per game) and Boast (only if it attacked this turn,
+    // once per turn) — enforced by game.js.
+    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), sacrificeCost, payLife, manaCost, sorcerySpeedOnly: isSorcerySpeedOnlyLine(line), exhaust: /^exhaust\b/i.test(costText.trim()), boast: /^boast\b/i.test(costText.trim()) });
   }
   if (abilities.length === 0 || abilities.every(a => isFullyUnsupported(a.steps))) {
     const aiAbilities = getAITapAbilities(card);
@@ -3345,7 +3374,7 @@ export function interpretNonTapAbilities(card) {
     if (sacMatch) sacrifice = /another/i.test(sacMatch[1]) ? 'other' : (/this|~/i.test(sacMatch[1]) ? 'self' : 'any');
     let removeCounters = null;
     if (removeCountersMatch) removeCounters = { amount: parseAmount(removeCountersMatch[1]), counterType: removeCountersMatch[2].toLowerCase() };
-    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), manaCost, sacrifice, removeCounters });
+    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), manaCost, sacrifice, removeCounters, exhaust: /^exhaust\b/i.test(costText), boast: /^boast\b/i.test(costText) });
   }
   if (abilities.length === 0 || abilities.every(a => isFullyUnsupported(a.steps))) {
     const aiAbilities = getAINonTapAbilities(card);
@@ -3994,6 +4023,39 @@ export function getRippleAmount(card) {
   return m ? parseInt(m[1], 10) : 0;
 }
 
+// Batch 7 keyword readers.
+// "Cumulative upkeep {1}" / "Cumulative upkeep—Pay 2 life" — { mana } or
+// { life }, or { unsupported: true } for other costs (sacrifice-shaped
+// ones), or null.
+export function getCumulativeUpkeep(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^cumulative upkeep(?:\s*—\s*|\s+)(.+?)\.?\s*$/im);
+  if (!m) return null;
+  const cost = m[1].trim();
+  if (/^(?:\{[^}]+\})+$/.test(cost)) return { mana: cost };
+  const life = cost.match(/^pay (\d+) life$/i);
+  if (life) return { life: parseInt(life[1], 10) };
+  return { unsupported: true, text: cost };
+}
+// "Reinforce 1—{1}{W}" — { amount, manaCost } or null.
+export function getReinforce(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^reinforce (\d+|x)\s*—\s*((?:\{[^}]+\})+)/im);
+  return m ? { amount: m[1].toLowerCase() === 'x' ? 'x' : parseInt(m[1], 10), manaCost: m[2] } : null;
+}
+// "Forecast — {5}{W}, Reveal this card from your hand: EFFECT" — only the
+// mana-cost shape ({ manaCost, steps }); Sky Hussar's tap-two-creatures
+// forecast returns null.
+export function getForecast(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^forecast\s*—\s*((?:\{[^}]+\})+),\s*reveal this card from your hand:\s*(.+)$/im);
+  if (!m) return null;
+  return { manaCost: m[1], effectText: m[2].trim(), steps: interpretEffectText(m[2].trim().toLowerCase()) };
+}
+// "Champion a creature" / "Champion a Faerie" — the type word, or null.
+export function getChampionType(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^champion an? ([a-z]+)/im);
+  return m ? m[1].toLowerCase() : null;
+}
+export function hasReadAhead(card) { return /^read ahead\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
+
 // Optional costs paid as a spell is cast (batch 4b). Each returns null when
 // the card doesn't have the keyword.
 // "Replicate {R}" / "Squad {2}" (each payable any number of times) and
@@ -4258,10 +4320,12 @@ export function interpretLandfallTriggers(card) {
 // game.js's triggerLeavesBattlefield() wherever a permanent actually leaves
 // (graveyard, exile, bounce).
 export function interpretLeavesTriggers(card) {
-  const lines = (card.oracleText || '').toLowerCase().split('\n').map(s => s.trim()).filter(Boolean);
+  // Also creatures, and the combined "enters or leaves the battlefield"
+  // (Aven Riftwatcher) — the "enters" half is interpretPermanentTriggers'.
+  const lines = replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase().split('\n').map(s => s.trim()).filter(Boolean);
   const steps = [];
   for (const line of lines) {
-    const m = line.match(/^when(?:ever)? this (?:enchantment|permanent) leaves the battlefield,\s*(.+)$/);
+    const m = line.match(/^when(?:ever)? this (?:enchantment|permanent|creature|artifact) (?:enters(?: the battlefield)? or )?leaves the battlefield,\s*(.+)$/);
     if (!m) continue;
     steps.push(...interpretEffectText(m[1]));
   }
