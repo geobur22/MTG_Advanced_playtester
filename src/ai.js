@@ -221,7 +221,10 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
       // removal-shaped for targeting purposes even though it neither deals
       // damage nor destroys directly: the whole point is to pick the best
       // enemy creature to trade into, same as burn/destroy.
-      const isRemoval = /deal|destroy|-\d+\/-\d+|fights?\b/i.test(card.oracleText || '');
+      // (Also exile, and anything that says it targets a creature "an
+      // opponent controls" / "you don't control" — Palace Jailer's exile
+      // used to target nothing, finding no creature of its own to pick.)
+      const isRemoval = /deal|destroy|exile target (?![^.]*\byou control\b)|-\d+\/-\d+|fights?\b|target creature an opponent controls|target creature you don'?t control/i.test(card.oracleText || '');
       const enemyCreatures = opponent.battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
       // "Any target"/"creature or player" (kind 'creatureOrPlayer' only —
       // bare 'creature' never includes them) can legally hit a planeswalker
@@ -325,6 +328,18 @@ function chooseCastWay(game, p, card) {
     && cmcOf(o.manaCost) < (card.cmc || 0))
     .sort((x, y) => cmcOf(x.manaCost) - cmcOf(y.manaCost))[0];
   if (cheaper) return { altCost: { kind: cheaper.kind } };
+  // Overload: worth it when the sweep hits more of the opponent's
+  // permanents than ours, and at least two of theirs.
+  const overload = options.find(o => o.kind === 'overload');
+  if (overload) {
+    const text = (card.oracleText || '').toLowerCase();
+    const type = (text.match(/target (creature|artifact|enchantment|nonland permanent|permanent|land)/) || [])[1];
+    const theirsOnly = /you don'?t control/.test(text);
+    const matches = (perm) => !type || type === 'permanent' || (type === 'nonland permanent' ? !isLand(game, perm.card) : game.hasTypeWord(perm.card, type));
+    const theirs = game.opponentOf(p.id).battlefield.filter(matches).length;
+    const ours = theirsOnly ? 0 : p.battlefield.filter(matches).length;
+    if (theirs >= 2 && theirs > ours) return { altCost: { kind: 'overload' } };
+  }
   const emerge = options.find(o => {
     const v = o.kind === 'emerge' && game.findPermanent(o.emergeVictimId);
     return v && (/\btoken\b/i.test(v.card.typeLine || '') || game.effectivePower(v) <= 2);
@@ -523,7 +538,7 @@ export function takeAITurnAction(game) {
       const kicked = game.getEntwineCost(card) ? entwine : game.canAffordKicked(p.id, card);
       const gift = !altCost && shouldPromiseGift(game, card);
       const bargainFodder = game.hasBargain(card) ? game.bargainCandidates(p.id).find(x => isTokenFodder(game, x)) : null;
-      const flags = { kicked, gift, bargained: !!bargainFodder };
+      const flags = { kicked, gift, bargained: !!bargainFodder, overload: altCost?.kind === 'overload' };
       // An {X} spell cast at a hardcoded X=0 achieves nothing (Comet Storm-
       // style payoffs are the whole point of the card) — spend as much as
       // can actually be afforded instead, and skip the card entirely rather
@@ -566,6 +581,13 @@ export function takeAITurnAction(game) {
       }
     }
 
+    // Fortify: attach an unattached Fortification to a land.
+    for (const perm of p.battlefield) {
+      if (perm.attachedTo || !game.getFortifyCost(perm.card) || !game.canFortify(p.id, perm.id)) continue;
+      const land = p.battlefield.find(x => isLand(game, x.card));
+      if (land && game.fortify(p.id, perm.id, land.id).ok) return;
+    }
+
     // Equip our best creature with any Equipment sitting unused (or
     // attached somewhere worse) — otherwise Equipment on the battlefield
     // just sits there doing nothing, which isn't what a real player does.
@@ -589,6 +611,10 @@ export function takeAITurnAction(game) {
       for (let i = 0; i < abilities.length; i++) {
         const ability = abilities[i];
         if (isFullyUnsupportedSteps(ability.steps)) continue; // no point activating a no-op
+        // Transfigure only into something bigger; Aura swap only for a
+        // pricier Aura from hand.
+        if (ability.transfigure && !p.library.some(c => isCreature(game, c) && (c.cmc || 0) === (perm.card.cmc || 0) && (parseInt(c.power, 10) || 0) > game.effectivePower(perm))) continue;
+        if (ability.auraSwap && !p.hand.some(c => isAura(game, c) && (c.cmc || 0) > (perm.card.cmc || 0))) continue;
         if (ability.sacrifice && p.battlefield.filter(x => isCreature(game, x.card)).length < 2) continue;
         if (!isWorthwhilePayToUntap(game, perm, ability)) continue;
         if (!game.canActivateNonTapAbility(p.id, perm.id, i)) continue;

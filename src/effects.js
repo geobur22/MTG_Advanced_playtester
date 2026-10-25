@@ -588,7 +588,7 @@ function interpretEffectText(text) {
       continue;
     }
 
-    if ((m = clause.match(/deals? (\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty) damage to (target [\w\s',-]+|any target|each creature and each opponent|each opponent|each creature|you)(?: and (?:you )?(?:draws? (a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+) cards?|gains? (\d+) life))?/))) {
+    if ((m = clause.match(/deals? (\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty) damage to (target [\w\s',-]+|any target|each creature and each opponent|each opponent|each creature you don'?t control|each creature|you)(?: and (?:you )?(?:draws? (a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+) cards?|gains? (\d+) life))?/))) {
       const amountToken = m[1];
       const amount = parseAmount(amountToken);
       const targetDesc = m[2];
@@ -604,7 +604,7 @@ function interpretEffectText(text) {
       // "you" (Midnight Reaper's damage target, and similar self-inflicted-
       // damage payoffs) always means the controller of whatever's dealing
       // the damage — never a real target choice.
-      const sweep = targetDesc === 'each creature and each opponent' ? 'creatureAndOpponent' : targetDesc === 'each creature' ? 'creature' : (targetDesc === 'each opponent' ? 'opponent' : (targetDesc === 'you' ? 'self' : null));
+      const sweep = /^each creature you don'?t control$/.test(targetDesc) ? 'theirCreatures' : targetDesc === 'each creature and each opponent' ? 'creatureAndOpponent' : targetDesc === 'each creature' ? 'creature' : (targetDesc === 'each opponent' ? 'opponent' : (targetDesc === 'you' ? 'self' : null));
       steps.push({
         kind: 'damage',
         amount,
@@ -614,6 +614,8 @@ function interpretEffectText(text) {
           const amt = resolveAmount(amountToken, ctx);
           if (sweep === 'self') {
             game.applyDamageEffect({ ...ctx, target: { type: 'player', id: ctx.controllerId } }, amt);
+          } else if (sweep === 'theirCreatures') {
+            game.applyEachPermanentEffect(ctx, 'creature', true, 'damage', amt);
           } else if (sweep === 'creature' || sweep === 'creatureAndOpponent') {
             // A board-wipe-shaped sweep (Blasphemous Act, Star of
             // Extinction, ...) — every creature on either side takes it,
@@ -749,7 +751,7 @@ function interpretEffectText(text) {
         targeting: 'none',
         resolve: (game, ctx) => {
           const controller = game.getPlayer(ctx.controllerId);
-          const count = controller.battlefield.filter(p => p.card.typeLine.toLowerCase().includes(typeWord)).length;
+          const count = controller.battlefield.filter(p => game.hasTypeWord(p.card, typeWord)).length;
           game.applyDrawEffect(ctx, count);
           game.applyLifegainEffect(ctx, -count);
         },
@@ -897,6 +899,56 @@ function interpretEffectText(text) {
     if ((m = clause.match(/^(?:you may )?play the exiled card without paying its mana cost(?: if (.+))?$/))) {
       const condition = m[1] || null;
       steps.push({ kind: 'hideawayPlay', targeting: 'none', resolve: (game, ctx) => game.applyHideawayPlay(ctx, condition) });
+      continue;
+    }
+
+    // Monarch: "you become the monarch"; "if you're the monarch, EFFECT";
+    // "if an opponent is the monarch, EFFECT". City's blessing (Ascend):
+    // "if you have the city's blessing, EFFECT".
+    if (/^you become the monarch$/.test(clause)) {
+      steps.push({ kind: 'monarch', targeting: 'none', resolve: (game, ctx) => game.becomeMonarch(ctx.controllerId) });
+      continue;
+    }
+    if ((m = clause.match(/^if (you'?re the monarch|an opponent is the monarch|you have the city'?s blessing),?\s*(.+)$/))) {
+      const cond = m[1];
+      for (const step of interpretEffectText(m[2])) {
+        steps.push({ ...step, resolve: (game, ctx) => {
+          const ok = /opponent/.test(cond) ? (game.monarch && game.monarch !== ctx.controllerId)
+            : /monarch/.test(cond) ? game.monarch === ctx.controllerId
+            : !!game.getPlayer(ctx.controllerId).citysBlessing;
+          if (ok) step.resolve(game, ctx);
+        } });
+      }
+      continue;
+    }
+    // Palace Jailer: "exile target creature an opponent controls until an
+    // opponent becomes the monarch".
+    if ((m = clause.match(/^exile (target [\w\s']+?) until an opponent becomes the monarch$/))) {
+      steps.push({ kind: 'exile', targeting: describeTargetKind(m[1]), resolve: (game, ctx) => game.applyMonarchExile(ctx) });
+      continue;
+    }
+    // Amass: "amass Zombies 2" / "amass 2".
+    if ((m = clause.match(/^amass(?: ([a-z]+))? (\d+|x|one|two|three|four|five)$/))) {
+      const type = m[1] ? m[1].replace(/s$/, '') : null;
+      const amountToken = m[2];
+      steps.push({ kind: 'amass', targeting: 'none', resolve: (game, ctx) => game.applyAmass(ctx, resolveAmount(amountToken, ctx), type) });
+      continue;
+    }
+    // Overloaded sweeps ("target" rewritten to "each"): destroy / return /
+    // damage each [type] [you don't control].
+    if ((m = clause.match(/^destroy each (creature|artifact|enchantment|land|nonland permanent|permanent|planeswalker)( you don'?t control)?$/))) {
+      const type = m[1], theirsOnly = !!m[2];
+      steps.push({ kind: 'destroy', targeting: 'none', resolve: (game, ctx) => game.applyEachPermanentEffect(ctx, type, theirsOnly, 'destroy') });
+      continue;
+    }
+    if ((m = clause.match(/^return each (creature|artifact|enchantment|land|nonland permanent|permanent)( you don'?t control)? to (?:its|their) owners?'?s? hands?$/))) {
+      const type = m[1], theirsOnly = !!m[2];
+      steps.push({ kind: 'bounce', targeting: 'none', resolve: (game, ctx) => game.applyEachPermanentEffect(ctx, type, theirsOnly, 'bounce') });
+      continue;
+    }
+    if ((m = clause.match(/deals (\d+|x) damage to each creature( you don'?t control)?$/)) && m[2]) {
+      const amountToken = m[1];
+      steps.push({ kind: 'damage', targeting: 'none', resolve: (game, ctx) => game.applyEachPermanentEffect(ctx, 'creature', true, 'damage', resolveAmount(amountToken, ctx)) });
       continue;
     }
 
@@ -3136,7 +3188,10 @@ export function applyCastConditions(text, flags = {}) {
 // flags: the cast-time choices applyCastConditions keys off.
 export function interpretSpell(card, modeIndexes = null, flags = null) {
   if (flags) {
-    const rewritten = applyCastConditions(card.oracleText || '', flags);
+    let rewritten = applyCastConditions(card.oracleText || '', flags);
+    // Overload: "change 'target' in its text to 'each'" (rules text only —
+    // the reminder and the Overload line itself are dropped first).
+    if (flags.overload) rewritten = rewritten.split('\n').filter(l => !/^overload\b/i.test(l.trim())).join('\n').replace(/\([^()]*\)/g, '').replace(/\btarget\b/gi, 'each');
     if (rewritten !== card.oracleText) card = { ...card, oracleText: rewritten };
   }
   const modal = getSpellModes(card);
@@ -3340,6 +3395,21 @@ export function interpretNonTapAbilities(card) {
   const lines = activatedAbilityLines(card);
   const abilities = [];
   for (const line of lines) {
+    // Transfigure {cost}: sacrifice this creature, find a creature card with
+    // the same mana value and put it onto the battlefield (sorcery speed).
+    // Aura swap {cost}: exchange this Aura with an Aura card in your hand.
+    const kw = line.match(/^(transfigure|aura swap) ((?:\{[^}]+\})+)$/i);
+    if (kw) {
+      const manaCost = (kw[2].match(/\{[^}]+\}/g) || []).filter(isPayableManaSymbol).join('');
+      const transfigure = /transfigure/i.test(kw[1]);
+      abilities.push({
+        effectText: transfigure ? 'Transfigure' : 'Aura swap', manaCost, isManaAbility: false,
+        sacrifice: transfigure ? 'self' : null, removeCounters: null, sorcerySpeedOnly: transfigure,
+        transfigure, auraSwap: !transfigure,
+        steps: [{ kind: transfigure ? 'transfigure' : 'auraSwap', targeting: 'none', resolve: (game, ctx) => (transfigure ? game.applyTransfigure(ctx) : game.applyAuraSwap(ctx)) }],
+      });
+      continue;
+    }
     const m = line.match(/^([^:]+):\s*(.+)$/);
     if (!m) continue;
     const costText = m[1].trim();
@@ -3928,7 +3998,7 @@ export function getCyclingAbility(card) {
 export function getAlternativeCosts(card) {
   const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
   const result = [];
-  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp']) {
+  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload']) {
     const m = text.match(new RegExp(`^${kind} ((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[1] });
   }
@@ -4055,6 +4125,16 @@ export function getChampionType(card) {
   return m ? m[1].toLowerCase() : null;
 }
 export function hasReadAhead(card) { return /^read ahead\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
+
+// Batch 8 readers.
+export function hasForMirrodin(card) { return /^for mirrodin!/im.test(card.oracleText || ''); }
+export function hasAscend(card) { return /^ascend\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
+export function hasSoulbond(card) { return /^soulbond\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
+export function hasUmbraArmor(card) { return /^(?:umbra|totem) armor\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
+export function getFortifyCost(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^fortify ((?:\{[^}]+\})+)/im);
+  return m ? m[1] : null;
+}
 
 // Optional costs paid as a spell is cast (batch 4b). Each returns null when
 // the card doesn't have the keyword.

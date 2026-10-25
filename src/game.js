@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -28,6 +28,18 @@ function isCreature(card) { return typeOf(card, 'creature'); }
 // by every token-creating helper) or an explicit isToken flag (token copies
 // of real cards, whose type line is copied from the original).
 function isTokenCard(card) { return !!card && (card.isToken || /\btoken\b/i.test(card.typeLine || '')); }
+// Changeling: "this card is every creature type". hasTypeWord is the
+// subtype-aware "does this card have type/subtype X" check used for tribal
+// counts, lords, and triggers — a changeling creature matches any creature
+// type, but not card types like "artifact".
+const NON_CREATURE_TYPE_WORDS = new Set(['artifact', 'creature', 'enchantment', 'land', 'planeswalker', 'instant', 'sorcery', 'battle', 'kindred', 'tribal', 'legendary', 'token', 'snow', 'basic', 'permanent', 'equipment', 'aura', 'vehicle', 'saga', 'treasure', 'food', 'clue', 'fortification', 'class', 'shrine', 'curse', 'cartouche']);
+function isChangeling(card) { return (card.keywords || []).includes('changeling') || /^changeling\b/im.test(card.oracleText || ''); }
+function hasTypeWord(card, word) {
+  const typeLine = (card.typeLine || '').toLowerCase();
+  if (typeLine.includes(word)) return true;
+  return isChangeling(card) && !NON_CREATURE_TYPE_WORDS.has(word) && /creature|kindred|tribal/.test(typeLine);
+}
+
 // A token that's a copy of `card` (Squad, Offspring's 1/1 copy, a copied
 // permanent spell). stats overrides power/toughness.
 function makeTokenCopyCard(card, stats = null) {
@@ -218,7 +230,7 @@ function anthemAppliesTo(a, source, perm) {
     const word = negated ? a.subtype.slice(4) : a.subtype;
     const forms = new Set([word, word.replace(/ves$/, 'f'), word.replace(/ies$/, 'y'), word.replace(/s$/, '')]);
     const subtypes = (typeLine.split('—')[1] || '').split(/\s+/).filter(Boolean);
-    const has = subtypes.some(s => forms.has(s));
+    const has = subtypes.some(s => forms.has(s)) || (isChangeling(perm.card) && ![...forms].some(f => NON_CREATURE_TYPE_WORDS.has(f)));
     if (negated ? has : !has) return false;
   }
   return true;
@@ -516,7 +528,7 @@ export class Game {
   static SNAPSHOT_FIELDS = [
     'players', 'stack', 'activePlayerIndex', 'priorityPlayerIndex', 'consecutivePasses',
     'stepIndex', 'turnNumber', 'logLines', 'gameOver', 'winner', 'pendingRequest',
-    '_firstTurn', 'mulligans', '_actionsSinceLastPass', 'pendingExtraCombats', 'leftBattlefieldThisTurn',
+    '_firstTurn', 'mulligans', '_actionsSinceLastPass', 'pendingExtraCombats', 'leftBattlefieldThisTurn', 'monarch', 'monarchExiles',
     'controlChanges',
   ];
 
@@ -589,7 +601,8 @@ export class Game {
   // Fires "whenever you draw a card" triggers (Fathom Mage, ...) — always
   // self-referential to the drawing player's own permanents.
   triggerDrawCard(player) {
-    for (const perm of player.battlefield) {
+    for (const perm of [...player.battlefield]) {
+      if (!this.findPermanent(perm.id)) continue;
       const steps = interpretDrawTriggers(perm.card);
       if (steps.length === 0) continue;
       this.resolveEffectSteps(steps, [], { controllerId: perm.controllerId, card: perm.card, sourcePerm: perm });
@@ -608,10 +621,11 @@ export class Game {
   triggerTribalEtb(enteredPerm) {
     const controller = this.getPlayer(enteredPerm.controllerId);
     const enteredTypeLine = (enteredPerm.card.typeLine || '').toLowerCase();
-    for (const watcher of controller.battlefield) {
+    for (const watcher of [...controller.battlefield]) {
+      if (!this.findPermanent(watcher.id)) continue;
       const entries = interpretTribalEtbTriggers(watcher.card);
       for (const entry of entries) {
-        if (!enteredTypeLine.includes(entry.typeWord)) continue;
+        if (!hasTypeWord(enteredPerm.card, entry.typeWord)) continue;
         // "A creature you control WITH FLYING enters" (Dragon Tempest) — a
         // keyword filter on top of the type-line one above, checked against
         // the entering permanent's REAL effective keywords (anthem-granted
@@ -649,7 +663,8 @@ export class Game {
   triggerAnyEtb(enteredPerm) {
     const enteredTypeLine = (enteredPerm.card.typeLine || '').toLowerCase();
     for (const pl of this.players) {
-      for (const watcher of pl.battlefield) {
+      for (const watcher of [...pl.battlefield]) {
+        if (!this.findPermanent(watcher.id)) continue;
         const entries = interpretAnyEtbTriggers(watcher.card);
         for (const entry of entries) {
           if (!enteredTypeLine.includes(entry.typeWord)) continue;
@@ -675,7 +690,8 @@ export class Game {
     // 'opponent' entries. Both loops key off the same landPerm event.
     for (const pl of this.players) {
       const wantedScope = pl.id === controller.id ? 'own' : 'opponent';
-      for (const watcher of pl.battlefield) {
+      for (const watcher of [...pl.battlefield]) {
+        if (!this.findPermanent(watcher.id)) continue;
         const entries = interpretLandfallTriggers(watcher.card);
         for (const entry of entries) {
           if (entry.scope !== wantedScope) continue;
@@ -958,7 +974,7 @@ export class Game {
   // spell's own {X} value rather than a literal number.
   applyTutorToBattlefieldEffect(ctx, typeWord, maxCmc) {
     const p = this.getPlayer(ctx.controllerId);
-    const candidates = p.library.filter(c => (c.typeLine || '').toLowerCase().includes(typeWord) && (c.cmc || 0) <= maxCmc);
+    const candidates = p.library.filter(c => hasTypeWord(c, typeWord) && (c.cmc || 0) <= maxCmc);
     if (candidates.length === 0) {
       this.log(`${ctx.card.name} finds no matching ${typeWord} card in ${p.name}'s library.`);
       p.library = shuffle(p.library);
@@ -1217,6 +1233,7 @@ export class Game {
       return;
     }
     if (step === 'end') {
+      if (this.monarch === this.active.id) { this.log(`${this.active.name} draws a card (the monarch).`); this.drawCard(this.active); }
       this.exileUnearthedPermanents();
       this.endStepAltCostCleanup();
       this.triggerPhase(interpretEndStepTriggers);
@@ -1391,7 +1408,8 @@ export class Game {
   // permanent the active player controls (only their own step — see
   // interpretPhaseTriggers in effects.js for the "each upkeep" simplification).
   triggerPhase(interpretFn) {
-    for (const perm of this.active.battlefield) {
+    for (const perm of [...this.active.battlefield]) {
+      if (!this.findPermanent(perm.id)) continue;
       const steps = interpretFn(perm.card);
       if (steps.length === 0) continue;
       this.resolveEffectSteps(steps, [], { controllerId: perm.controllerId, card: perm.card, sourcePerm: perm });
@@ -1642,9 +1660,9 @@ export class Game {
       const onlyYours = / you control/.test(m[0]);
       let count = 0;
       if (onlyYours) {
-        count = this.getPlayer(controllerId).battlefield.filter(p => p.card.typeLine.toLowerCase().includes(typeWord)).length;
+        count = this.getPlayer(controllerId).battlefield.filter(p => hasTypeWord(p.card, typeWord)).length;
       } else {
-        for (const pl of this.players) count += pl.battlefield.filter(p => p.card.typeLine.toLowerCase().includes(typeWord)).length;
+        for (const pl of this.players) count += pl.battlefield.filter(p => hasTypeWord(p.card, typeWord)).length;
       }
       selfReduction = perEach * count;
     } else {
@@ -1660,7 +1678,7 @@ export class Game {
     const affinity = plain.match(/^affinity for ([a-z ]+?)\s*$/m);
     if (affinity) {
       const typeWord = affinity[1].trim().replace(/s$/, '');
-      selfReduction += this.getPlayer(controllerId).battlefield.filter(p => (p.card.typeLine || '').toLowerCase().includes(typeWord)).length;
+      selfReduction += this.getPlayer(controllerId).battlefield.filter(p => hasTypeWord(p.card, typeWord)).length;
     }
     // Undaunted: {1} less for each opponent — always exactly one here.
     if (/^undaunted\s*$/m.test(plain)) selfReduction += 1;
@@ -2254,7 +2272,7 @@ export class Game {
     const copy = { ...item, id: uid('stk'), isCopy: true, controllerId, targets: [...item.targets] };
     this.stack.push(copy);
     this.log(`A copy of ${item.card.name} is put on the stack (${why}).`);
-    const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift };
+    const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift, overload: item.altCostKind === 'overload' };
     const kinds = this.getRequiredTargetKinds(item.card, item.modeIndexes, flags);
     const permanentKinds = ['creature', 'creatureOrPlayer', 'planeswalker', 'playerOrPlaneswalker', 'permanent', 'player', 'artifact', 'enchantment', 'land'];
     if (kinds.length && kinds.every(k => permanentKinds.includes(k))) {
@@ -2395,6 +2413,7 @@ export class Game {
   // affecting everything a player controls). Runs right after the spell is
   // committed to the stack, mirroring real Magic's "cast trigger" timing.
   triggerCastSpell(playerId, castCard) {
+    this.triggerExtort(playerId, castCard);
     const caster = this.getPlayer(playerId);
     for (const perm of caster.battlefield) {
       const triggers = interpretCastTriggers(perm.card);
@@ -2573,7 +2592,12 @@ export class Game {
       if (top) { victim.exile.push(top); this.log(`Ingest: ${victim.name} exiles ${top.name} from the top of their library.`); }
     }
     const controller = this.getPlayer(sourcePerm.controllerId);
-    for (const watcher of controller.battlefield) {
+    // Snapshot: what triggers is fixed at the moment the damage is dealt. A
+    // live loop let token copies made mid-loop trigger too — Bloodforged
+    // Battle-Axe's copies, attached to the same creature by Sigarda's Aid,
+    // copied themselves forever.
+    for (const watcher of [...controller.battlefield]) {
+      if (!this.findPermanent(watcher.id)) continue;
       const triggers = interpretCombatDamageTriggers(watcher.card);
       for (const trig of triggers) {
         // "Whenever enchanted/equipped creature deals combat damage to a
@@ -2735,7 +2759,7 @@ export class Game {
     // castFromGraveyard lets a clause key off "if this spell was cast from
     // a graveyard" (Increasing Confusion's own doubled mill) — set whenever
     // this resolution came from castFromGraveyard's Flashback/Escape path.
-    const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift };
+    const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift, overload: item.altCostKind === 'overload' };
     this.resolveEffectSteps(interpretSpell(card, item.modeIndexes, flags), item.targets, { controllerId, card, xValue: item.xValue, castFromGraveyard: !!(item.viaFlashback || item.viaEscape || item.fromZone === 'graveyard') });
     // A copy of a spell ceases to exist instead of going anywhere.
     if (item.isCopy) {
@@ -2995,6 +3019,14 @@ export class Game {
   // creature for a payoff), and Evolve on OTHER creatures you control.
   triggerEntryKeywords(perm) {
     this.applyHideaway(perm);
+    if (hasForMirrodin(perm.card)) {
+      // For Mirrodin!: a 2/2 red Rebel token, then attach this to it.
+      const p = this.getPlayer(perm.controllerId);
+      this.applyTokenEffect({ controllerId: p.id, card: perm.card }, 1, 2, 2, 'red rebel');
+      const rebel = p.battlefield[p.battlefield.length - 1];
+      if (this.findPermanent(perm.id)) { perm.attachedTo = rebel.id; this.log(`${perm.card.name} is attached to the Rebel.`); }
+    }
+    if (isCreature(perm.card)) this.offerSoulbond(perm);
     const championType = getChampionType(perm.card);
     if (championType) this.offerChampion(perm, championType);
     if (!isCreature(perm.card)) return;
@@ -3246,6 +3278,7 @@ export class Game {
     if (!ability) return false;
     if (!ability.isManaAbility && this.splitSecondActive()) return false;
     if (!this.abilityUseAllowed(perm, ability)) return false;
+    if (ability.sorcerySpeedOnly && !(playerId === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
     const restrictionKws = this.effectiveKeywords(perm);
     if (restrictionKws.has('cantActivateAbilities')) return false;
     if (restrictionKws.has('cantActivateNonManaAbilities') && !ability.isManaAbility) return false;
@@ -3613,6 +3646,229 @@ export class Game {
       }
     }
   }
+
+  // ---------- Batch 8 ----------
+  hasTypeWord(card, word) { return hasTypeWord(card, word); }
+
+  // The monarch draws at their end step; combat damage to the monarch
+  // takes it. Palace Jailer's exiles return when an opponent of its
+  // controller becomes the monarch.
+  becomeMonarch(playerId) {
+    if (this.monarch === playerId) return;
+    this.monarch = playerId;
+    this.log(`${this.getPlayer(playerId).name} becomes the monarch.`);
+    for (const entry of [...(this.monarchExiles || [])]) {
+      if (entry.controllerId === playerId) continue;
+      this.monarchExiles = this.monarchExiles.filter(e => e !== entry);
+      const owner = this.getPlayer(entry.ownerId);
+      const i = owner.exile.indexOf(entry.card);
+      if (i === -1) continue;
+      owner.exile.splice(i, 1);
+      const back = makePermanent(entry.card, owner.id);
+      owner.battlefield.push(back);
+      this.log(`${entry.card.name} returns to the battlefield (an opponent became the monarch).`);
+      this.triggerETB(back);
+    }
+  }
+
+  applyMonarchExile(ctx) {
+    const perm = ctx.target?.type === 'permanent' ? this.findPermanent(ctx.target.id) : null;
+    if (!perm) return;
+    this.applyExileEffect(ctx);
+    const owner = this.getPlayer(perm.ownerId);
+    if (owner.exile.includes(perm.card)) (this.monarchExiles ||= []).push({ card: perm.card, ownerId: perm.ownerId, controllerId: ctx.controllerId });
+  }
+
+  // Amass [type] N: put N +1/+1 counters on an Army you control (it gains
+  // the type); if you have none, create a 0/0 black [type] Army first.
+  applyAmass(ctx, n, type = null) {
+    const p = this.getPlayer(ctx.controllerId);
+    let army = p.battlefield.find(x => isCreature(x.card) && /\barmy\b/i.test(x.card.typeLine || ''));
+    const typeName = type ? type[0].toUpperCase() + type.slice(1) : '';
+    if (!army) {
+      this.applyTokenEffect(ctx, 1, 0, 0, `black ${type || ''} army`.replace(/\s+/g, ' '));
+      army = p.battlefield[p.battlefield.length - 1];
+    } else if (type && !hasTypeWord(army.card, type)) {
+      army.card = { ...army.card, typeLine: army.card.typeLine.replace(/—\s*/, `— ${typeName} `) };
+    }
+    if (n > 0) this.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: army.id } }, n, '+1/+1');
+    this.log(`${p.name} amasses ${n}.`);
+  }
+
+  // Overload sweeps: destroy / bounce / damage each permanent of a type,
+  // optionally only those the caster doesn't control.
+  applyEachPermanentEffect(ctx, type, theirsOnly, action, amount = 0) {
+    const matches = (perm) => type === 'permanent' ? true
+      : type === 'nonland permanent' ? !isLand(perm.card)
+      : hasTypeWord(perm.card, type);
+    const victims = this.players.filter(pl => !theirsOnly || pl.id !== ctx.controllerId)
+      .flatMap(pl => pl.battlefield.filter(matches));
+    for (const perm of victims) {
+      if (!this.findPermanent(perm.id)) continue;
+      if (action === 'destroy') this.applyDestroyEffect({ ...ctx, target: { type: 'permanent', id: perm.id }, targets: null });
+      else if (action === 'bounce') this.applyBounceEffect({ ...ctx, target: { type: 'permanent', id: perm.id } });
+      else if (action === 'damage') this.applyDamageEffect({ ...ctx, target: { type: 'permanent', id: perm.id } }, amount);
+    }
+    this.checkStateBasedActions();
+  }
+
+  // Absorb N on a creature (printed, or "All Sliver creatures have absorb N").
+  absorbAmount(perm) {
+    let n = this.keywordAmount(perm.card, 'absorb');
+    for (const pl of this.players) for (const other of pl.battlefield) {
+      const m = (other.card.oracleText || '').match(/all (\w+) creatures have absorb (\d+)/i);
+      if (m && hasTypeWord(perm.card, m[1].toLowerCase())) n = Math.max(n, parseInt(m[2], 10));
+    }
+    return n;
+  }
+
+  // Extort: whenever you cast a spell, each extort permanent you control
+  // lets you pay {W/B} to drain 1. AI pays when it can.
+  triggerExtort(playerId, spellCard) {
+    const p = this.getPlayer(playerId);
+    for (const perm of p.battlefield.filter(x => /^extort\b/im.test((x.card.oracleText || '').replace(/\([^()]*\)/g, '')))) {
+      if (!this.payableNow(playerId, '{W/B}')) continue;
+      const pay = () => {
+        if (!this.payNow(playerId, '{W/B}')) return;
+        const opp = this.opponentOf(playerId);
+        opp.life -= 1; p.life += 1;
+        this.log(`${perm.card.name} extorts: ${opp.name} loses 1 life and ${p.name} gains 1.`);
+        this.checkStateBasedActions();
+      };
+      this.requestChoice(playerId, `${perm.card.name} — Extort (${spellCard.name} was cast): pay {W/B}?`, [
+        { label: 'Pay {W/B} (drain 1)', resolve: pay },
+        { label: "Don't pay", resolve: () => {} },
+      ], 0);
+    }
+  }
+
+  // Ascend: "can't attack or block unless you have the city's blessing"
+  // and "has KW as long as you have the city's blessing".
+  applyBlessingKeywords(perm, set) {
+    const text = (perm.card.oracleText || '').toLowerCase();
+    if (!/city'?s blessing/.test(text)) return;
+    const blessed = !!this.getPlayer(perm.controllerId)?.citysBlessing;
+    if (!blessed && /can'?t attack or block unless you have the city'?s blessing/.test(text)) { set.add('cantAttack'); set.add('cantBlock'); }
+    const grant = text.match(/(?:as long as you have the city'?s blessing, this (?:creature|permanent) (?:has|gets [^.]*? and has) ([^.]+))|(?:this (?:creature|permanent) has ([^.]+?) as long as you have the city'?s blessing)/);
+    if (blessed && grant) for (const kw of extractKnownKeywords(grant[1] || grant[2])) set.add(kw);
+  }
+
+  // Soulbond: when a soulbond creature enters, or a creature enters while
+  // you control an unpaired soulbond creature, you may pair them. Pair
+  // bonuses: "As long as this creature is paired with another creature,
+  // both creatures have KW / each of those creatures gets +N/+N".
+  offerSoulbond(perm) {
+    const p = this.getPlayer(perm.controllerId);
+    const unpaired = (x) => isCreature(x.card) && !this.pairedPartner(x);
+    if (hasSoulbond(perm.card)) {
+      const partners = p.battlefield.filter(x => x.id !== perm.id && unpaired(x)).sort((a, b) => this.effectivePower(b) - this.effectivePower(a)).slice(0, 7);
+      if (partners.length) {
+        this.requestChoice(p.id, `${perm.card.name} — Soulbond: pair with?`, [
+          ...partners.map(x => ({ label: `Pair with ${x.card.name}`, resolve: () => this.pairCreatures(perm, x) })),
+          { label: "Don't pair", resolve: () => {} },
+        ], 0);
+      }
+      return;
+    }
+    const bonder = p.battlefield.find(x => x.id !== perm.id && hasSoulbond(x.card) && unpaired(x));
+    if (bonder && unpaired(perm)) {
+      this.requestChoice(p.id, `${bonder.card.name} — Soulbond: pair with ${perm.card.name}?`, [
+        { label: `Pair ${bonder.card.name} with ${perm.card.name}`, resolve: () => this.pairCreatures(bonder, perm) },
+        { label: "Don't pair", resolve: () => {} },
+      ], 0);
+    }
+  }
+
+  pairCreatures(a, b) {
+    if (!this.findPermanent(a.id) || !this.findPermanent(b.id)) return;
+    a.pairedWith = b.id; b.pairedWith = a.id;
+    this.log(`${a.card.name} and ${b.card.name} are paired (soulbond).`);
+  }
+
+  // A creature's current pair partner, if the pairing still holds (both on
+  // the battlefield under the same controller).
+  pairedPartner(perm) {
+    if (!perm.pairedWith) return null;
+    const other = this.findPermanent(perm.pairedWith);
+    return other && other.pairedWith === perm.id && other.controllerId === perm.controllerId ? other : null;
+  }
+
+  pairBonus(perm) {
+    const bonus = { power: 0, toughness: 0, keywords: [] };
+    const partner = this.pairedPartner(perm);
+    if (!partner) return bonus;
+    for (const source of [perm, partner]) {
+      const text = (source.card.oracleText || '').toLowerCase();
+      const m = text.match(/as long as (?:this creature|[^,]+?) is paired with another creature, (?:both creatures|each of those creatures) (?:have|has|gets?) ([^.]+)/);
+      if (!m) continue;
+      const stats = m[1].match(/([+-]\d+)\/([+-]\d+)/);
+      if (stats) { bonus.power += parseInt(stats[1], 10); bonus.toughness += parseInt(stats[2], 10); }
+      bonus.keywords.push(...extractKnownKeywords(m[1]));
+    }
+    return bonus;
+  }
+
+  // Transfigure: (this creature was sacrificed as the cost) find a creature
+  // card with the same mana value, put it onto the battlefield, shuffle.
+  applyTransfigure(ctx) {
+    const p = this.getPlayer(ctx.controllerId);
+    const cmc = ctx.card.cmc || 0;
+    const pick = p.library.filter(c => isCreature(c) && (c.cmc || 0) === cmc && c.name !== ctx.card.name)
+      .sort((a, b) => (parseInt(b.power, 10) || 0) - (parseInt(a.power, 10) || 0))[0];
+    p.library = shuffle(p.library.filter(c => c !== pick));
+    if (!pick) { this.log(`${ctx.card.name}'s transfigure finds nothing.`); return; }
+    const perm = makePermanent(pick, p.id);
+    p.battlefield.push(perm);
+    this.log(`${ctx.card.name} transfigures into ${pick.name}.`);
+    this.checkStateBasedActions();
+    this.triggerETB(perm);
+  }
+
+  // Aura swap: exchange this Aura with an Aura card in hand (the priciest),
+  // attached to the same thing.
+  applyAuraSwap(ctx) {
+    const aura = ctx.sourcePerm;
+    const p = this.getPlayer(ctx.controllerId);
+    if (!aura || !this.findPermanent(aura.id)) return;
+    const incoming = p.hand.filter(c => isAura(c)).sort((a, b) => (b.cmc || 0) - (a.cmc || 0))[0];
+    if (!incoming) { this.log(`${p.name} has no Aura card to swap in.`); return; }
+    const host = aura.attachedTo;
+    p.battlefield = p.battlefield.filter(x => x.id !== aura.id);
+    this.detachFromLeavingBattlefield(aura);
+    this.triggerLeavesBattlefield(aura);
+    this.getPlayer(aura.ownerId).hand.push(aura.card);
+    p.hand.splice(p.hand.indexOf(incoming), 1);
+    const perm = makePermanent(incoming, p.id);
+    perm.attachedTo = host;
+    p.battlefield.push(perm);
+    this.log(`${p.name} swaps ${aura.card.name} for ${incoming.name}.`);
+    this.checkStateBasedActions();
+  }
+
+  // Fortify {cost}: attach this Fortification to a land you control
+  // (sorcery speed).
+  canFortify(playerId, permId) {
+    const perm = this.findPermanent(permId);
+    const p = this.getPlayer(playerId);
+    if (!perm || perm.controllerId !== playerId || this.gameOver || this.pendingRequest || this.splitSecondActive()) return false;
+    const cost = getFortifyCost(perm.card);
+    if (!cost || !(p.id === this.active.id && this.priorityPlayer.id === playerId && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    return p.battlefield.some(x => isLand(x.card)) && this.payableNow(playerId, cost);
+  }
+
+  fortify(playerId, permId, landId) {
+    if (!this.canFortify(playerId, permId)) return { ok: false, reason: "Can't fortify right now." };
+    const perm = this.findPermanent(permId);
+    const land = this.findPermanent(landId);
+    if (!land || land.controllerId !== playerId || !isLand(land.card)) return { ok: false, reason: 'Fortify needs a land you control.' };
+    this.payNow(playerId, getFortifyCost(perm.card));
+    perm.attachedTo = land.id;
+    this.log(`${this.getPlayer(playerId).name} fortifies ${land.card.name} with ${perm.card.name}.`);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  getFortifyCost(card) { return getFortifyCost(card); }
 
   // ---------- Batch 7: counters, upkeep costs, and other timing keywords ----------
 
@@ -4518,6 +4774,13 @@ export class Game {
   // Damage to a creature from a source with these keywords: Infect and
   // Wither deal it as -1/-1 counters instead of marked damage.
   damageCreature(target, amount, sourceKws) {
+    // Absorb N: prevent N of each damage event (printed, or granted —
+    // Lymph Sliver's "All Sliver creatures have absorb 1").
+    const absorb = this.absorbAmount(target);
+    if (absorb > 0 && amount > 0) {
+      amount = Math.max(0, amount - absorb);
+      this.log(`${target.card.name} absorbs ${absorb} damage.`);
+    }
     if (amount <= 0) return;
     if (sourceKws.has('infect') || sourceKws.has('wither')) {
       target.counters['-1/-1'] = (target.counters['-1/-1'] || 0) + amount;
@@ -4638,12 +4901,28 @@ export class Game {
     if (ctx.target?.type !== 'permanent') return;
     const perm = this.findPermanent(ctx.target.id);
     if (!perm) return;
-    if ((perm.card.keywords || []).includes('indestructible')) {
+    if (this.effectiveKeywords(perm).has('indestructible')) {
       this.log(`${perm.card.name} is indestructible and isn't destroyed.`);
       return;
     }
+    if (this.tryUmbraArmor(perm)) return;
     this.movePermanentToGraveyard(perm);
     this.log(`${ctx.card.name} destroys ${perm.card.name}.`);
+  }
+
+  // Umbra armor: if the enchanted creature would be destroyed, instead
+  // remove all damage from it and destroy the Aura. Returns true if it
+  // saved the creature.
+  tryUmbraArmor(perm) {
+    for (const pl of this.players) {
+      const umbra = pl.battlefield.find(x => x.attachedTo === perm.id && hasUmbraArmor(x.card));
+      if (!umbra) continue;
+      perm.damage = 0;
+      this.log(`${umbra.card.name}'s umbra armor saves ${perm.card.name}; ${umbra.card.name} is destroyed instead.`);
+      this.movePermanentToGraveyard(umbra);
+      return true;
+    }
+    return false;
   }
 
   // "Destroy all creatures" (Wrath of God, Damnation, ...), optionally
@@ -4656,7 +4935,7 @@ export class Game {
       for (const perm of [...pl.battlefield]) {
         if (!isCreature(perm.card)) continue;
         if (typeWord) {
-          const matches = (perm.card.typeLine || '').toLowerCase().includes(typeWord);
+          const matches = hasTypeWord(perm.card, typeWord);
           if (negate ? matches : !matches) continue;
         }
         this.applyDestroyEffect({ ...ctx, target: { type: 'permanent', id: perm.id } });
@@ -4720,7 +4999,7 @@ export class Game {
   // every upkeep, not a one-time check.
   applyGreatestManaValueDrawEffect(ctx, typeWord) {
     const controller = this.getPlayer(ctx.controllerId);
-    const matches = (perm) => (perm.card.typeLine || '').toLowerCase().includes(typeWord);
+    const matches = (perm) => hasTypeWord(perm.card, typeWord);
     const globalMax = Math.max(0, ...this.players.flatMap(pl => pl.battlefield.filter(matches).map(p => p.card.cmc || 0)));
     const ownMax = Math.max(0, ...controller.battlefield.filter(matches).map(p => p.card.cmc || 0));
     if (controller.battlefield.some(matches) && ownMax >= globalMax) this.applyDrawEffect(ctx, 1);
@@ -4870,9 +5149,9 @@ export class Game {
   applyDynamicManaEffect(ctx, color, typeWord, onlyYours) {
     let count = 0;
     if (onlyYours) {
-      count = this.getPlayer(ctx.controllerId).battlefield.filter(p => (p.card.typeLine || '').toLowerCase().includes(typeWord)).length;
+      count = this.getPlayer(ctx.controllerId).battlefield.filter(p => hasTypeWord(p.card, typeWord)).length;
     } else {
-      for (const pl of this.players) count += pl.battlefield.filter(p => (p.card.typeLine || '').toLowerCase().includes(typeWord)).length;
+      for (const pl of this.players) count += pl.battlefield.filter(p => hasTypeWord(p.card, typeWord)).length;
     }
     for (let i = 0; i < count; i++) this.applyManaEffect(ctx, color);
   }
@@ -5357,7 +5636,7 @@ export class Game {
   // simplification as everywhere else in this engine.
   applyTutorToTopEffect(ctx, typeWord) {
     const p = this.getPlayer(ctx.controllerId);
-    const idx = p.library.findIndex(c => (c.typeLine || '').toLowerCase().includes(typeWord));
+    const idx = p.library.findIndex(c => hasTypeWord(c, typeWord));
     if (idx === -1) {
       this.log(`${ctx.card.name} finds no ${typeWord} card in ${p.name}'s library.`);
       p.library = shuffle(p.library);
@@ -5522,7 +5801,7 @@ export class Game {
     const p = this.getPlayer(ctx.controllerId);
     const found = [];
     for (let i = 0; i < maxCount; i++) {
-      const idx = p.library.findIndex(c => (c.typeLine || '').toLowerCase().includes(typeWord) && (c.cmc || 0) <= maxCmc);
+      const idx = p.library.findIndex(c => hasTypeWord(c, typeWord) && (c.cmc || 0) <= maxCmc);
       if (idx === -1) break;
       found.push(p.library.splice(idx, 1)[0]);
     }
@@ -6408,7 +6687,7 @@ export class Game {
     const p = this.getPlayer(ctx.controllerId);
     // "permanent" (Kor Skyfisher) isn't a real type-line word — it means
     // any permanent at all, no type filter.
-    let candidates = typeWord === 'permanent' ? p.battlefield.slice() : p.battlefield.filter(perm => (perm.card.typeLine || '').toLowerCase().includes(typeWord));
+    let candidates = typeWord === 'permanent' ? p.battlefield.slice() : p.battlefield.filter(perm => hasTypeWord(perm.card, typeWord));
     if (excludeSelf && ctx.sourcePerm) candidates = candidates.filter(perm => perm.id !== ctx.sourcePerm.id);
     if (candidates.length === 0) return;
     const cheapest = candidates.sort((a, b) => (a.card.cmc || 0) - (b.card.cmc || 0))[0];
@@ -6830,6 +7109,7 @@ export class Game {
     power += this.selfAttachmentBonus(perm, 'power');
     power += counterStatTotal(perm.counters, 'power');
     power += perm.tempBuffs.reduce((s, b) => s + b.power, 0);
+    power += this.pairBonus(perm).power;
     return power;
   }
 
@@ -6840,6 +7120,7 @@ export class Game {
     t += this.selfAttachmentBonus(perm, 'toughness');
     t += counterStatTotal(perm.counters, 'toughness');
     t += perm.tempBuffs.reduce((s, b) => s + b.toughness, 0);
+    t += this.pairBonus(perm).toughness;
     return t;
   }
 
@@ -6941,7 +7222,7 @@ export class Game {
     let count = 0;
     for (const pl of this.players) {
       for (const other of pl.battlefield) {
-        if (other.attachedTo === perm.id && (other.card.typeLine || '').toLowerCase().includes(typeWord)) count++;
+        if (other.attachedTo === perm.id && hasTypeWord(other.card, typeWord)) count++;
       }
     }
     return count;
@@ -6950,6 +7231,15 @@ export class Game {
   effectiveKeywords(perm) {
     const set = new Set(perm.card.keywords || []);
     for (const kw of perm.tempKeywords || []) set.add(kw);
+    // Soulbond pair keyword grants, and city's-blessing (Ascend) conditions.
+    for (const kw of this.pairBonus(perm).keywords) set.add(kw);
+    this.applyBlessingKeywords(perm, set);
+    // Fortified land: "Fortified land has indestructible."
+    for (const pl of this.players) for (const f of pl.battlefield) {
+      if (f.attachedTo !== perm.id) continue;
+      const fm = (f.card.oracleText || '').toLowerCase().match(/fortified land (?:has|gains) ([^.]+)/);
+      if (fm) for (const kw of extractKnownKeywords(fm[1])) set.add(kw);
+    }
 
     // Auras/Equipment granting keywords to what they're attached to, e.g.
     // "Enchanted creature has flying, first strike, and vigilance." or
@@ -7511,6 +7801,8 @@ export class Game {
       }
     }
     if (isCommanderSource) defenderPlayer.commanderDamageTaken += amount;
+    // Combat damage to the monarch makes the attacker's controller the monarch.
+    if (amount > 0 && this.monarch === defenderPlayer.id) this.becomeMonarch(attackerPerm.controllerId);
     // Toxic N: combat damage to a player also gives N poison counters.
     const toxic = this.keywordAmount(attackerPerm.card, 'toxic');
     if (toxic > 0) {
@@ -7592,6 +7884,14 @@ export class Game {
 
   checkStateBasedActions() {
     if (this.gameOver) return;
+    // Ascend: ten or more permanents with an ascend permanent in play gives
+    // the city's blessing for the rest of the game.
+    for (const p of this.players) {
+      if (!p.citysBlessing && p.battlefield.length >= 10 && p.battlefield.some(x => hasAscend(x.card))) {
+        p.citysBlessing = true;
+        this.log(`${p.name} gets the city's blessing.`);
+      }
+    }
     // Rule 704.5d: a token that's left the battlefield (died, bounced,
     // exiled) ceases to exist. Its "dies" triggers have already fired by
     // the time this runs; without this, dead tokens piled up in graveyards
@@ -7615,7 +7915,7 @@ export class Game {
       const dead = p.battlefield.filter(perm => isCreature(perm.card) &&
         (perm.damage >= this.effectiveToughness(perm) || this.effectiveToughness(perm) <= 0));
       for (const perm of dead) {
-        if ((perm.card.keywords || []).includes('indestructible') && this.effectiveToughness(perm) > 0) continue;
+        if (this.effectiveToughness(perm) > 0 && (this.effectiveKeywords(perm).has('indestructible') || this.tryUmbraArmor(perm))) continue;
         this.log(`${perm.card.name} dies.`);
         this.movePermanentToGraveyard(perm);
       }

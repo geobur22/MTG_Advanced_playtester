@@ -607,6 +607,12 @@ function renderPlayerBar(container, player, isOpponent) {
   }
 
   // Suspended cards are public information: name and time counters left.
+  if (game.monarch === player.id || player.citysBlessing) {
+    const status = document.createElement('span');
+    status.className = 'stat';
+    status.textContent = [game.monarch === player.id && 'The monarch', player.citysBlessing && "City's blessing"].filter(Boolean).join(' · ');
+    container.appendChild(status);
+  }
   if ((player.rebounding || []).length > 0) {
     const reb = document.createElement('span');
     reb.className = 'stat';
@@ -1379,7 +1385,7 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
   // bargain can change what the spell targets.
   const extras = altCost ? {} : await chooseCastExtras(card, modeIndexes);
   if (extras === null) return;
-  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain });
+  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain, overload: altCost?.kind === 'overload' });
   let xValue = 0;
   const parsed = parseManaCost(card.manaCost);
   if (parsed.x > 0) {
@@ -1692,6 +1698,15 @@ function getAvailableActionsForPermanent(perm) {
       actions.push({ label: ability.effectText, execute: () => activateNonTapAbilityAtIndex(perm, i) });
     }
   });
+
+  // Fortify: attach to a land you control (pick from your lands).
+  if (game.getFortifyCost(perm.card) && game.canFortify(HUMAN_ID, perm.id)) {
+    actions.push({ label: `Fortify ${game.getFortifyCost(perm.card)}`, execute: async () => {
+      const lands = game.getPlayer(HUMAN_ID).battlefield.filter(x => game.isLand(x.card));
+      const pick = await pickPermanentFromList('Fortify which land?', lands);
+      if (pick) { const r = game.fortify(HUMAN_ID, perm.id, pick.id); if (!r.ok) showAlert(r.reason); }
+    } });
+  }
 
   if (game.isPlaneswalker(perm.card)) {
     game.getLoyaltyAbilities(perm).forEach((ability, i) => {
