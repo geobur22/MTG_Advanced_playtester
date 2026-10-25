@@ -99,7 +99,7 @@ function permanentTargetMatcher(game, card, kind) {
   if (kind === 'artifact') return (p) => game.isArtifact(p.card);
   if (kind === 'enchantment') return (p) => game.isEnchantment(p.card);
   if (kind === 'land') return (p) => game.isLand(p.card);
-  const phrase = ((card.oracleText || '').toLowerCase().match(/target ([^.;:]*?)(?:permanent|\.|,|$)/) || [])[1] || '';
+  const phrase = ((card.oracleText || '').replace(/\([^()]*\)/g, '').toLowerCase().match(/target ([^.;:]*?)(?:permanent|\.|,|$)/) || [])[1] || '';
   const named = ['artifact', 'creature', 'enchantment', 'land', 'planeswalker'].filter(t => new RegExp(`(?<!non)\\b${t}\\b`).test(phrase));
   const nonland = /\bnonland\b/.test(phrase);
   if (named.length) {
@@ -224,7 +224,7 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
       // (Also exile, and anything that says it targets a creature "an
       // opponent controls" / "you don't control" — Palace Jailer's exile
       // used to target nothing, finding no creature of its own to pick.)
-      const isRemoval = /deal|destroy|exile target (?![^.]*\byou control\b)|-\d+\/-\d+|fights?\b|target creature an opponent controls|target creature you don'?t control/i.test(card.oracleText || '');
+      const isRemoval = /deal|destroy|exile target (?![^.]*\byou control\b)|-\d+\/-\d+|fights?\b|target creature an opponent controls|target creature you don'?t control|phases out until/i.test(card.oracleText || '');
       const enemyCreatures = opponent.battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id));
       // "Any target"/"creature or player" (kind 'creatureOrPlayer' only —
       // bare 'creature' never includes them) can legally hit a planeswalker
@@ -340,6 +340,10 @@ function chooseCastWay(game, p, card) {
     const ours = theirsOnly ? 0 : p.battlefield.filter(matches).length;
     if (theirs >= 2 && theirs > ours) return { altCost: { kind: 'overload' } };
   }
+  // Mutate onto our best non-Human creature when it's cheaper than
+  // casting normally, or the normal cost isn't affordable.
+  const mutate = options.find(o => o.kind === 'mutate');
+  if (mutate && (!normal || cmcOf(mutate.manaCost) <= (card.cmc || 0))) return { altCost: { kind: 'mutate', mutateTargetId: mutate.mutateTargetId } };
   const emerge = options.find(o => {
     const v = o.kind === 'emerge' && game.findPermanent(o.emergeVictimId);
     return v && (/\btoken\b/i.test(v.card.typeLine || '') || game.effectivePower(v) <= 2);
@@ -613,6 +617,7 @@ export function takeAITurnAction(game) {
         if (isFullyUnsupportedSteps(ability.steps)) continue; // no point activating a no-op
         // Transfigure only into something bigger; Aura swap only for a
         // pricier Aura from hand.
+        if (ability.steps.some(s => s.kind === 'phase')) continue; // phasing ourselves out is defensive, not for random use
         if (ability.transfigure && !p.library.some(c => isCreature(game, c) && (c.cmc || 0) === (perm.card.cmc || 0) && (parseInt(c.power, 10) || 0) > game.effectivePower(perm))) continue;
         if (ability.auraSwap && !p.hand.some(c => isAura(game, c) && (c.cmc || 0) > (perm.card.cmc || 0))) continue;
         if (ability.sacrifice && p.battlefield.filter(x => isCreature(game, x.card)).length < 2) continue;
@@ -690,6 +695,18 @@ export function takeAITurnAction(game) {
       }
       const result = game.activateGraveyardAbility(p.id, entry.card.instanceId, targets);
       if (result.ok) return;
+    }
+
+    // Face-down: turn a face-down creature up whenever affordable (main 1
+    // first, so it attacks as the real thing); cast a morph/disguise card
+    // face down when its normal cost is out of reach but {3} isn't.
+    for (const perm of p.battlefield) {
+      if (perm.faceDown && game.canTurnFaceUp(p.id, perm.id) && game.turnFaceUp(p.id, perm.id).ok) return;
+    }
+    for (const card of p.hand) {
+      if (game.getFaceDownCost(card) && !game.affordability(p.id, card) && game.canCastFaceDown(p.id, card.instanceId)) {
+        if (game.castFaceDown(p.id, card.instanceId).ok) return;
+      }
     }
 
     // Foretell / Plot with mana left over after everything above (nothing

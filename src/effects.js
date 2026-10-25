@@ -952,6 +952,24 @@ function interpretEffectText(text) {
       continue;
     }
 
+    // Manifest / cloak the top card of your library (cloak adds ward {2}).
+    if ((m = clause.match(/^(manifest|cloak) the top (?:card|(two|three) cards) of your library$/))) {
+      const kind = m[1], count = m[2] ? parseAmount(m[2]) : 1;
+      steps.push({ kind: 'manifest', targeting: 'none', resolve: (game, ctx) => { for (let i = 0; i < count; i++) game.manifestTop(ctx.controllerId, kind); } });
+      continue;
+    }
+    // Phasing: "this creature phases out" / "target creature phases out
+    // [until this enchantment leaves the battlefield]".
+    if ((m = clause.match(/^(this creature|this permanent|target [\w\s]+?) phases out( until this (?:enchantment|artifact|creature|permanent) leaves the battlefield)?$/))) {
+      const self = /^this /.test(m[1]), untilLeaves = !!m[2];
+      steps.push({ kind: 'phase', targeting: self ? 'none' : describeTargetKind(m[1]), resolve: (game, ctx) => {
+        const perm = self ? ctx.sourcePerm : (ctx.target?.type === 'permanent' ? game.findPermanent(ctx.target.id) : null);
+        if (perm) game.phaseOut(perm, untilLeaves ? ctx.sourcePerm : null);
+      } });
+      continue;
+    }
+    if (/^tap that creature as it phases in this way$/.test(clause)) continue; // handled by phaseIn
+
     // "Two target players each draw a card" (Huddle Up).
     if ((m = clause.match(/^(two|three) target players each draw (a|an|one|two|three|\d+) cards?$/))) {
       const count = parseAmount(m[1]), amount = parseAmount(m[2]);
@@ -3998,7 +4016,7 @@ export function getCyclingAbility(card) {
 export function getAlternativeCosts(card) {
   const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
   const result = [];
-  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload']) {
+  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload', 'mutate']) {
     const m = text.match(new RegExp(`^${kind} ((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[1] });
   }
@@ -4134,6 +4152,34 @@ export function hasUmbraArmor(card) { return /^(?:umbra|totem) armor\b/im.test((
 export function getFortifyCost(card) {
   const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^fortify ((?:\{[^}]+\})+)/im);
   return m ? m[1] : null;
+}
+
+// Batch 9: face-down casting. "Morph {2}{W}{W}" / "Megamorph {1}{G}" /
+// "Disguise {5}{R}" — { kind, cost } (disguise's own cost-reduction
+// sentence isn't applied), or null.
+export function getFaceDownCost(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^(megamorph|morph|disguise) ((?:\{[^}]+\})+)/im);
+  return m ? { kind: m[1].toLowerCase(), cost: m[2] } : null;
+}
+// "When this creature is turned face up, EFFECT" steps.
+export function interpretTurnFaceUpTriggers(card) {
+  const lines = replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase().split('\n').map(x => x.trim());
+  const steps = [];
+  for (const line of lines) {
+    const m = line.match(/^when(?:ever)? this (?:creature|permanent) is turned face up,\s*(.+)$/);
+    if (m) steps.push(...interpretEffectText(m[1]));
+  }
+  return steps;
+}
+// "Whenever this creature mutates, EFFECT" steps.
+export function interpretMutateTriggers(card) {
+  const lines = replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase().split('\n').map(x => x.trim());
+  const steps = [];
+  for (const line of lines) {
+    const m = line.match(/^whenever this creature mutates,\s*(.+)$/);
+    if (m) steps.push(...interpretEffectText(m[1]));
+  }
+  return steps;
 }
 
 // Optional costs paid as a spell is cast (batch 4b). Each returns null when

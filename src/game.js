@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -38,6 +38,19 @@ function hasTypeWord(card, word) {
   const typeLine = (card.typeLine || '').toLowerCase();
   if (typeLine.includes(word)) return true;
   return isChangeling(card) && !NON_CREATURE_TYPE_WORDS.has(word) && /creature|kindred|tribal/.test(typeLine);
+}
+
+// The nameless 2/2 a face-down card shows as (Morph, Megamorph, Manifest;
+// Disguise and Cloak also give it ward {2}). The real card rides along on
+// the permanent's faceDown field and is revealed when it turns face up or
+// leaves the battlefield.
+function makeFaceDownCard(real, kind) {
+  const ward = kind === 'disguise' || kind === 'cloak';
+  return {
+    id: uid('facedown'), instanceId: real.instanceId, name: 'Face-down creature', manaCost: '', cmc: 0,
+    typeLine: 'Creature', oracleText: ward ? 'Ward {2}' : '', power: '2', toughness: '2',
+    colors: [], colorIdentity: [], keywords: ward ? ['ward'] : [], producedMana: null, image: null, isFaceDown: true,
+  };
 }
 
 // A token that's a copy of `card` (Squad, Offspring's 1/1 copy, a copied
@@ -734,6 +747,13 @@ export class Game {
   // from every path that actually removes a permanent from a battlefield
   // (graveyard, exile, bounce), alongside detachFromLeavingBattlefield.
   triggerLeavesBattlefield(perm) {
+    for (const id of perm.phasedOutByThis || []) {
+      for (const pl of this.players) {
+        const entry = (pl.phasedOut || []).find(e => e.perm.id === id);
+        if (entry) this.phaseIn(entry, { tap: true });
+      }
+    }
+    perm.phasedOutByThis = null;
     // Champion: the championed card returns when this leaves.
     if (perm.championed) {
       const { card: returning, ownerId } = perm.championed;
@@ -1159,6 +1179,7 @@ export class Game {
       // reset per-combat flags at the start of each turn's untap step
     }
     if (step === 'untap') {
+      this.applyPhasingAtUntap(this.active);
       for (const perm of this.active.battlefield) {
         // Two ways a permanent can skip its own untap: a STATIC self-
         // declaration re-checked fresh every turn (Mana Vault's own "this
@@ -1937,7 +1958,7 @@ export class Game {
       // Prototype — must be one getCastOptions currently offers.
       let altInfo = null, emergeVictim = null;
       if (altCost) {
-        altInfo = this.getCastOptions(playerId, card).find(o => o.kind === altCost.kind && (o.kind !== 'emerge' || o.emergeVictimId === altCost.emergeVictimId));
+        altInfo = this.getCastOptions(playerId, card).find(o => o.kind === altCost.kind && (o.kind !== 'emerge' || o.emergeVictimId === altCost.emergeVictimId) && (o.kind !== 'mutate' || o.mutateTargetId === altCost.mutateTargetId));
         if (!altInfo) return { ok: false, reason: `Can't cast ${card.name} that way right now.` };
         if (altInfo.emergeVictimId) emergeVictim = this.findPermanent(altInfo.emergeVictimId);
       }
@@ -1980,6 +2001,7 @@ export class Game {
       phyrexianPaidWithLife,
       viaSuspend,
       altCostKind: altCost?.kind || null,
+      mutateTargetId: altCost?.kind === 'mutate' ? altCost.mutateTargetId : null,
       buyback: !!kickerCost && !getKickerCost(card) && !!getBuybackCost(card),
       entwined: !!kickerCost && !getKickerCost(card) && !getBuybackCost(card) && !!getEntwineCost(card),
       isPermanentSpell: isPermanentType(card) && !isAura(card),
@@ -2345,6 +2367,7 @@ export class Game {
     if (!this.checkWardAndMaybeCounter(stackItem.controllerId, stackItem.targets)) return;
     this.stack = this.stack.filter(s => s.id !== stackItem.id);
     if (stackItem.isCopy) return;
+    if (stackItem.faceDown) stackItem.card = stackItem.faceDown.card;
     // The card's real owner (see castSpell's own `ownerId` option/comment)
     // — almost always the same as the caster, but not for a card like
     // Etali, Primal Storm's own attack trigger casts someone else's.
@@ -2628,8 +2651,23 @@ export class Game {
     // original only — a copy doesn't give a second gift).
     if (item.gift && !item.isCopy) this.deliverGift(card, controllerId);
 
+    // Mutate: merge onto the target creature (if it's still a legal
+    // non-Human creature its caster owns); otherwise it enters normally.
+    if (item.isPermanentSpell && item.mutateTargetId) {
+      const target = this.findPermanent(item.mutateTargetId);
+      if (target && isCreature(target.card) && target.ownerId === controllerId && !/\bhuman\b/i.test(target.card.typeLine || '')) {
+        const aiTop = (parseInt(card.power, 10) || 0) >= (parseInt(target.card.power, 10) || 0);
+        this.requestChoice(controllerId, `Mutate ${card.name}: on top or underneath ${target.card.name}?`, [
+          { label: `On top (it becomes ${card.name})`, resolve: () => (this.findPermanent(target.id) ? this.mergeMutate(target, card, true) : p.graveyard.push(card)) },
+          { label: `Underneath (it stays ${target.card.name})`, resolve: () => (this.findPermanent(target.id) ? this.mergeMutate(target, card, false) : p.graveyard.push(card)) },
+        ], aiTop ? 0 : 1);
+        return;
+      }
+    }
+
     if (item.isPermanentSpell) {
       const perm = makePermanent(card, controllerId);
+      if (item.faceDown) perm.faceDown = item.faceDown;
       perm.wasBargained = !!item.bargained;
       perm.giftPromised = !!item.gift;
       perm.squadCount = item.squadCount || 0;
@@ -3604,6 +3642,16 @@ export class Game {
         }
         continue;
       }
+      if (alt.kind === 'mutate') {
+        // One option per non-Human creature you own and control.
+        const parsedM = parseManaCost(alt.manaCost);
+        parsedM.generic = Math.max(0, parsedM.generic - reduction);
+        if (!this.planSpellPayment(playerId, card, parsedM, 0)) continue;
+        const hosts = p.battlefield.filter(x => isCreature(x.card) && x.ownerId === playerId && !x.faceDown && !/\bhuman\b/i.test(x.card.typeLine || '') && this.canBeTargetedBy(x, playerId, card))
+          .sort((a, b) => this.effectivePower(b) - this.effectivePower(a)).slice(0, 5);
+        for (const h of hosts) options.push({ ...alt, mutateTargetId: h.id, label: `Mutate ${card.name} onto ${h.card.name} (${alt.manaCost})` });
+        continue;
+      }
       const parsed = parseManaCost(alt.manaCost);
       parsed.generic = Math.max(0, parsed.generic - reduction);
       if (this.planSpellPayment(playerId, card, parsed, 0)) options.push({ ...alt, label });
@@ -3645,6 +3693,159 @@ export class Game {
         }
       }
     }
+  }
+
+  // ---------- Batch 9: face-down permanents, Mutate, Phasing ----------
+  getFaceDownCost(card) { return getFaceDownCost(card); }
+
+  // Cast a Morph/Megamorph/Disguise card face down as a nameless 2/2 for
+  // {3} (Disguise's also has ward {2}).
+  canCastFaceDown(playerId, instanceId) {
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    if (!card || !getFaceDownCost(card)) return false;
+    const fd = makeFaceDownCard(card, getFaceDownCost(card).kind);
+    return this.canCastSpell(playerId, fd) && this.payableNow(playerId, '{3}');
+  }
+
+  castFaceDown(playerId, instanceId) {
+    if (!this.canCastFaceDown(playerId, instanceId)) return { ok: false, reason: "Can't cast that face down right now." };
+    const p = this.getPlayer(playerId);
+    const idx = p.hand.findIndex(c => c.instanceId === instanceId);
+    const real = p.hand[idx];
+    const info = getFaceDownCost(real);
+    const fd = { ...makeFaceDownCard(real, info.kind), manaCost: '{3}' };
+    p.hand.splice(idx, 1, fd);
+    const result = this.castSpell(playerId, fd.instanceId, [], 0, null, false, { costOverride: '{3}' });
+    if (!result.ok) {
+      const i = p.hand.indexOf(fd);
+      if (i !== -1) p.hand.splice(i, 1, real);
+      return result;
+    }
+    fd.manaCost = '';
+    const item = this.stack.find(x => x.card === fd);
+    if (item) item.faceDown = { card: real, kind: info.kind };
+    return result;
+  }
+
+  // Manifest / cloak: the top card of the library onto the battlefield
+  // face down as a 2/2 (cloak's with ward {2}).
+  manifestTop(playerId, kind = 'manifest') {
+    const p = this.getPlayer(playerId);
+    const real = p.library.shift();
+    if (!real) return null;
+    const perm = makePermanent(makeFaceDownCard(real, kind), playerId);
+    perm.faceDown = { card: real, kind };
+    p.battlefield.push(perm);
+    this.log(`${p.name} ${kind === 'cloak' ? 'cloaks' : 'manifests'} the top card of their library.`);
+    this.checkStateBasedActions();
+    this.triggerETB(perm);
+    return perm;
+  }
+
+  // The cost to turn a face-down permanent face up: its morph/megamorph/
+  // disguise cost, or for a manifested/cloaked creature card its mana cost.
+  faceUpCost(perm) {
+    if (!perm.faceDown) return null;
+    const real = perm.faceDown.card;
+    const own = getFaceDownCost(real);
+    if (own) return own.cost;
+    return isCreature(real) && real.manaCost ? real.manaCost : null;
+  }
+
+  // Turning face up is a special action: any time you have priority.
+  canTurnFaceUp(playerId, permId) {
+    const perm = this.findPermanent(permId);
+    if (!perm?.faceDown || perm.controllerId !== playerId || this.gameOver || this.pendingRequest || this.priorityPlayer.id !== playerId) return false;
+    const cost = this.faceUpCost(perm);
+    return !!cost && this.payableNow(playerId, cost);
+  }
+
+  turnFaceUp(playerId, permId) {
+    if (!this.canTurnFaceUp(playerId, permId)) return { ok: false, reason: "Can't turn that face up right now." };
+    const perm = this.findPermanent(permId);
+    const cost = this.faceUpCost(perm);
+    this.payNow(playerId, cost);
+    const { card: real, kind } = perm.faceDown;
+    perm.faceDown = null;
+    perm.card = real;
+    this.log(`${this.getPlayer(playerId).name} turns ${real.name} face up (${cost}).`);
+    if (getFaceDownCost(real)?.kind === 'megamorph') this.applyCounterAdditionEffect({ controllerId: playerId, card: real, target: { type: 'permanent', id: perm.id } }, 1, '+1/+1');
+    this.runPermanentTrigger(perm, interpretTurnFaceUpTriggers(real));
+    this.checkStateBasedActions();
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  // A permanent's own triggered steps, with targets: picked by the AI, or
+  // asked of a human through the same prompt as an ETB target.
+  runPermanentTrigger(perm, steps, extraCtx = {}) {
+    if (!steps.length) return;
+    const kinds = expandTargetKinds(steps);
+    const ctxBase = { controllerId: perm.controllerId, card: perm.card, sourcePerm: perm, ...extraCtx };
+    if (!kinds.length || this.getPlayer(perm.controllerId).isAI || this.pendingRequest) {
+      const targets = kinds.length ? pickTargetsForKinds(this, perm.card, perm.controllerId, kinds, perm.id) : [];
+      this.resolveEffectSteps(steps, targets, ctxBase);
+      this.checkStateBasedActions();
+      return;
+    }
+    this._pendingETB = { perm, steps, ctxBase };
+    this.pendingRequest = { type: 'etbTarget', playerId: perm.controllerId, cardName: perm.card.name, kinds, collected: [], sourcePermId: perm.id };
+    this.emit();
+  }
+
+  // Every real card a permanent represents (a mutated creature is several).
+  cardsOf(perm) { return perm.mutateCards ? [...perm.mutateCards] : [perm.card]; }
+
+  // Mutate: merge `card` over or under `target`. The merged creature has
+  // the top card's name, types, and stats plus every card's abilities.
+  // Then its "whenever this creature mutates" triggers fire.
+  mergeMutate(target, card, onTop) {
+    const under = target.mutateCards || [target.card];
+    const cards = onTop ? [card, ...under] : [...under, card];
+    const top = cards[0];
+    target.mutateCards = cards;
+    target.card = {
+      ...top,
+      oracleText: cards.map(c => c.oracleText || '').filter(Boolean).join('\n'),
+      keywords: [...new Set(cards.flatMap(c => c.keywords || []))],
+    };
+    this.log(`${card.name} mutates ${onTop ? 'onto' : 'under'} ${under[0].name} — it's now ${top.name}.`);
+    this.runPermanentTrigger(target, interpretMutateTriggers(target.card));
+    this.checkStateBasedActions();
+  }
+
+  // Phasing: a phased-out permanent (and what's attached to it) is treated
+  // as though it doesn't exist — held aside with no leave/enter triggers —
+  // until it phases back in during its controller's untap step (or, for
+  // Oubliette-style effects, when the source leaves the battlefield).
+  phaseOut(perm, untilSource = null) {
+    const p = this.getPlayer(perm.controllerId);
+    if (!p.battlefield.includes(perm)) return;
+    const attached = this.players.flatMap(pl => pl.battlefield.filter(x => x.attachedTo === perm.id));
+    for (const a of attached) { const ap = this.getPlayer(a.controllerId); ap.battlefield = ap.battlefield.filter(x => x !== a); }
+    p.battlefield = p.battlefield.filter(x => x !== perm);
+    perm.attacking = false; perm.blockedBy = []; perm.blocking = null;
+    (p.phasedOut ||= []).push({ perm, attached, untilSourceId: untilSource?.id || null, phasedOutOnTurn: this.turnNumber });
+    if (untilSource) (untilSource.phasedOutByThis ||= []).push(perm.id);
+    this.log(`${perm.card.name} phases out.`);
+  }
+
+  phaseIn(entry, { tap = false } = {}) {
+    const p = this.getPlayer(entry.perm.controllerId);
+    p.phasedOut = (p.phasedOut || []).filter(e => e !== entry);
+    p.battlefield.push(entry.perm);
+    for (const a of entry.attached) this.getPlayer(a.controllerId).battlefield.push(a);
+    if (tap) entry.perm.tapped = true;
+    this.log(`${entry.perm.card.name} phases in${tap ? ' tapped' : ''}.`);
+  }
+
+  // Untap step: phased-out permanents phase in and phasing permanents phase
+  // out, simultaneously.
+  applyPhasingAtUntap(p) {
+    const goingOut = p.battlefield.filter(x => this.effectiveKeywords(x).has('phasing'));
+    for (const entry of [...(p.phasedOut || [])]) if (!entry.untilSourceId) this.phaseIn(entry);
+    for (const perm of goingOut) this.phaseOut(perm);
   }
 
   // ---------- Batch 8 ----------
@@ -4972,6 +5173,7 @@ export class Game {
       return;
     }
     const countered = this.stack.splice(idx, 1)[0];
+    if (countered.faceDown) countered.card = countered.faceDown.card;
     const owner = this.getPlayer(countered.controllerId);
     // A countered COMMANDER spell goes back to the command zone, not the
     // graveyard, same "commander replacement effect" already applied
@@ -6372,7 +6574,7 @@ export class Game {
       if (ctx.sourcePerm.exiledCards) ctx.sourcePerm.exiledCards.push({ card: perm.card, ownerId: perm.ownerId });
     }
     if (this.redirectCommanderToZone(perm)) return;
-    this.getPlayer(perm.ownerId).exile.push(perm.card);
+    this.getPlayer(perm.ownerId).exile.push(...this.cardsOf(perm));
     this.log(`${ctx.card.name} exiles ${perm.card.name}.`);
   }
 
@@ -6622,7 +6824,7 @@ export class Game {
     this.triggerLeavesBattlefield(perm);
     if (this.exileIfUnearthed(perm)) return;
     if (this.redirectCommanderToZone(perm)) return;
-    owner.hand.push(perm.card);
+    owner.hand.push(...this.cardsOf(perm));
     this.log(`${ctx.card.name} returns ${perm.card.name} to ${owner.name}'s hand.`);
   }
 
@@ -7001,7 +7203,7 @@ export class Game {
     // controller's — these only ever diverge for a permanent currently
     // under temporary control (a Threaten effect — see
     // applyGainControlEffect), but real rules are unconditional about it.
-    this.getPlayer(perm.ownerId).graveyard.push(perm.card);
+    this.getPlayer(perm.ownerId).graveyard.push(...this.cardsOf(perm));
     this.leftBattlefieldThisTurn.push({ card: perm.card, ownerId: perm.ownerId });
     this.triggerDies(perm, previouslyAttachedIds);
     if (wasCreature) this.triggerRecover(this.getPlayer(perm.ownerId), perm.card);
@@ -7061,6 +7263,8 @@ export class Game {
   // unattached and stays on the battlefield — that's the actual rules
   // difference between the two, not just an implementation detail.
   detachFromLeavingBattlefield(perm) {
+    // A face-down permanent is revealed as it leaves the battlefield.
+    if (perm.faceDown) { perm.card = perm.faceDown.card; perm.faceDown = null; }
     for (const pl of this.players) {
       for (const other of pl.battlefield.filter(x => x.attachedTo === perm.id)) {
         if (isAura(other.card)) this.movePermanentToGraveyard(other);

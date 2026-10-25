@@ -846,6 +846,15 @@ function renderPermanentCard(group, isOpponent) {
   // — +1/+1 counters were only visible indirectly through the P/T they'd
   // already bumped, and Sagas' lore counters (tracking chapter progress)
   // weren't visible at all.
+  // Your own face-down permanents show what they really are (the opponent
+  // only sees a 2/2).
+  if (rep.faceDown && rep.controllerId === HUMAN_ID) {
+    const fdBadge = document.createElement('div');
+    fdBadge.className = 'card-counters-badge';
+    fdBadge.textContent = `Face down: ${rep.faceDown.card.name}`;
+    div.appendChild(fdBadge);
+  }
+
   const counterEntries = Object.entries(rep.counters || {}).filter(([, n]) => n);
   if (counterEntries.length > 0) {
     const counterBadge = document.createElement('div');
@@ -1273,8 +1282,12 @@ function handCardAlternatives(card) {
   // Alternative casting costs usable right now (Dash, Evoke, Spectacle, ...).
   if (!game.isLand(card) && game.canCastSpell(HUMAN_ID, card)) {
     for (const opt of game.getCastOptions(HUMAN_ID, card)) {
-      options.push({ label: opt.label, execute: () => handleHandCardClick(card, { skipCycleChoice: true, altCost: { kind: opt.kind, emergeVictimId: opt.emergeVictimId } }) });
+      options.push({ label: opt.label, execute: () => handleHandCardClick(card, { skipCycleChoice: true, altCost: { kind: opt.kind, emergeVictimId: opt.emergeVictimId, mutateTargetId: opt.mutateTargetId } }) });
     }
+  }
+  const faceDown = game.getFaceDownCost(card);
+  if (faceDown && game.canCastFaceDown(HUMAN_ID, card.instanceId)) {
+    options.push({ label: `Cast face down as a 2/2 for {3} (${faceDown.kind} ${faceDown.cost} to turn up)`, execute: () => { const r = game.castFaceDown(HUMAN_ID, card.instanceId); if (!r.ok) showAlert(r.reason); } });
   }
   const forecast = game.getForecast(card);
   if (forecast && game.canForecast(HUMAN_ID, card.instanceId)) {
@@ -1698,6 +1711,11 @@ function getAvailableActionsForPermanent(perm) {
       actions.push({ label: ability.effectText, execute: () => activateNonTapAbilityAtIndex(perm, i) });
     }
   });
+
+  // Turn a face-down permanent face up.
+  if (perm.faceDown && game.canTurnFaceUp(HUMAN_ID, perm.id)) {
+    actions.push({ label: `Turn face up (${perm.faceDown.card.name}, ${game.faceUpCost(perm)})`, execute: () => { const r = game.turnFaceUp(HUMAN_ID, perm.id); if (!r.ok) showAlert(r.reason); } });
+  }
 
   // Fortify: attach to a land you control (pick from your lands).
   if (game.getFortifyCost(perm.card) && game.canFortify(HUMAN_ID, perm.id)) {
