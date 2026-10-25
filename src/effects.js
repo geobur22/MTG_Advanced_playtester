@@ -2982,6 +2982,26 @@ export function interpretPermanentTriggers(card) {
     const m = line.match(/^(?:as|when(?:ever)?)\s+(.+?)\s+enters(?: the battlefield)?(?:\s+or\s+(?:attacks|becomes monstrous))?,\s*(.+)$/);
     if (!m) continue;
     if (/\banother\b/.test(m[1])) continue; // triggers off other permanents entering — not modeled
+    // "If its prowl/surge/... cost was paid, EFFECT" (Latchkey Faerie,
+    // Reckless Bushwhacker) and "if it was kicked, EFFECT" — the effect
+    // only happens when the permanent was actually cast that way
+    // (perm.altCostKind / perm.wasKicked, set by resolveTop).
+    const cond = m[2].match(/^if (?:its|this creature's|this permanent's) (prowl|surge|dash|blitz|evoke|spectacle|freerunning|emerge|prototype) cost was paid,?\s*(.+)$/)
+      // (\s+ rather than \s*, so the lookahead can't be dodged by backtracking:
+      // Territorial Allosaurus's own fight clause has its dedicated pattern.)
+      || m[2].match(/^if it was (kicked),?\s+(?!it fights)(.+)$/);
+    if (cond) {
+      const kind = cond[1];
+      steps.push(...interpretEffectText(cond[2]).map(step => ({
+        ...step,
+        resolve: (game, ctx) => {
+          const perm = ctx.sourcePerm;
+          const paid = kind === 'kicked' ? perm?.wasKicked : perm?.altCostKind === kind;
+          if (paid) step.resolve(game, ctx);
+        },
+      })));
+      continue;
+    }
     steps.push(...interpretEffectText(m[2]));
   }
   if (isFullyUnsupported(steps)) {
@@ -3675,6 +3695,24 @@ export function getCyclingAbility(card) {
   const manaCost = (m[2].match(/\{[^}]+\}/g) || []).filter(isPayableManaSymbol).join('');
   if (!manaCost) return null;
   return { manaCost, searchType: m[1].trim().toLowerCase() || null };
+}
+
+// Alternative costs that replace a card's mana cost when cast from hand:
+// Dash, Blitz, Evoke, Emerge, Spectacle, Prowl, Surge, Freerunning, and
+// Prototype ("Prototype {1}{B}{B} — 3/3", which also changes its stats).
+// Returns [{ kind, manaCost, power?, toughness? }]. Whether each is
+// currently usable (Spectacle needs an opponent to have lost life, etc.)
+// is game.js's job — see getCastOptions.
+export function getAlternativeCosts(card) {
+  const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+  const result = [];
+  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning']) {
+    const m = text.match(new RegExp(`^${kind} ((?:\\{[^}]+\\})+)`, 'im'));
+    if (m) result.push({ kind, manaCost: m[1] });
+  }
+  const proto = text.match(/^prototype ((?:\{[^}]+\})+)\s*[—-]\s*(\d+)\/(\d+)/im);
+  if (proto) result.push({ kind: 'prototype', manaCost: proto[1], power: proto[2], toughness: proto[3] });
+  return result;
 }
 
 // "Suspend 4—{U}" — returns { time, manaCost } or null. (An X-time suspend

@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -307,6 +307,14 @@ function makePlayer(id, name, deck, isAI, startingLife = 20) {
     // Cards drawn so far this turn — Miracle cares whether a card is the
     // FIRST one drawn this turn. Reset at the start of every turn.
     cardsDrawnThisTurn: 0,
+    // Per-turn facts some alternative costs check: Surge (cast another
+    // spell this turn), Spectacle (an opponent lost life this turn —
+    // compared against life at the turn's start), Prowl/Freerunning (a
+    // creature of a given type, or a commander, dealt combat damage to a
+    // player this turn). All reset at the start of every turn.
+    spellsCastThisTurn: 0,
+    lifeAtTurnStart: 20,
+    combatDamagerTypesThisTurn: [],
     // Emblems (a planeswalker ultimate's "You get an emblem with '...'") —
     // no physical card, so just the raw granted-ability text strings,
     // checked by anthemBonus/effectiveKeywords the same way a permanent's
@@ -1105,7 +1113,7 @@ export class Game {
       // "This turn" is a shared, global concept (only one turn happens at a
       // time) — a new turn beginning resets it for BOTH players, not just
       // whoever's turn it now is.
-      for (const pl of this.players) { pl.damageTakenThisTurn = 0; pl.cardsDrawnThisTurn = 0; }
+      for (const pl of this.players) { pl.damageTakenThisTurn = 0; pl.cardsDrawnThisTurn = 0; pl.spellsCastThisTurn = 0; pl.lifeAtTurnStart = pl.life; pl.combatDamagerTypesThisTurn = []; }
       this.leftBattlefieldThisTurn = [];
       this.advanceStep();
       return;
@@ -1144,6 +1152,7 @@ export class Game {
     }
     if (step === 'end') {
       this.exileUnearthedPermanents();
+      this.endStepAltCostCleanup();
       this.triggerPhase(interpretEndStepTriggers);
       this.openPriorityWindow();
       return;
@@ -1790,7 +1799,7 @@ export class Game {
   // (see getKickerCost) — folded into the mana payment below, and recorded
   // on the resulting permanent as `wasKicked` (see resolveTop) for its own
   // "if it was kicked, ..." ETB trigger to read back.
-  castSpell(playerId, instanceId, targets = [], xValue = 0, modeIndexes = null, kicked = false, { free = false, bypassTiming = false, ownerId = null, costOverride = null, viaSuspend = false } = {}) {
+  castSpell(playerId, instanceId, targets = [], xValue = 0, modeIndexes = null, kicked = false, { free = false, bypassTiming = false, ownerId = null, costOverride = null, viaSuspend = false, altCost = null } = {}) {
     const p = this.getPlayer(playerId);
     const idx = p.hand.findIndex(c => c.instanceId === instanceId);
     if (idx === -1) return { ok: false, reason: 'Card not in hand.' };
@@ -1826,12 +1835,24 @@ export class Game {
       // parseManaCost's own symbol-scanning as-is — it just sees more
       // {...} tokens, in any order.
       // costOverride: an alternative cost replacing the mana cost (Miracle).
-      const parsed = parseManaCost((costOverride ?? card.manaCost) + (kickerCost || ''));
-      parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId));
+      // altCost: Dash/Blitz/Evoke/Emerge/Spectacle/Prowl/Surge/Freerunning/
+      // Prototype — must be one getCastOptions currently offers.
+      let altInfo = null, emergeVictim = null;
+      if (altCost) {
+        altInfo = this.getCastOptions(playerId, card).find(o => o.kind === altCost.kind && (o.kind !== 'emerge' || o.emergeVictimId === altCost.emergeVictimId));
+        if (!altInfo) return { ok: false, reason: `Can't cast ${card.name} that way right now.` };
+        if (altInfo.emergeVictimId) emergeVictim = this.findPermanent(altInfo.emergeVictimId);
+      }
+      const parsed = parseManaCost((altInfo ? altInfo.manaCost : (costOverride ?? card.manaCost)) + (kickerCost || ''));
+      parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId) - (emergeVictim ? (emergeVictim.card.cmc || 0) : 0));
       const payment = this.planSpellPayment(playerId, card, parsed, lifePaymentX ? 0 : xValue);
       if (!payment) return { ok: false, reason: 'Not enough mana.' };
       this.applySpellPayment(playerId, card, payment);
       phyrexianPaidWithLife = payment.phyrexianPaidWithLife;
+      if (emergeVictim) {
+        this.log(`${p.name} sacrifices ${emergeVictim.card.name} to emerge ${card.name}.`);
+        this.movePermanentToGraveyard(emergeVictim, { sacrifice: true });
+      }
       if (lifePaymentX && xValue > 0) {
         p.life -= xValue;
         this.log(`${p.name} pays ${xValue} life as an additional cost to cast ${card.name}.`);
@@ -1858,6 +1879,7 @@ export class Game {
       kicked: !!kickerCost && !!getKickerCost(card),
       phyrexianPaidWithLife,
       viaSuspend,
+      altCostKind: altCost?.kind || null,
       buyback: !!kickerCost && !getKickerCost(card) && !!getBuybackCost(card),
       entwined: !!kickerCost && !getKickerCost(card) && !getBuybackCost(card) && !!getEntwineCost(card),
       isPermanentSpell: isPermanentType(card) && !isAura(card),
@@ -1869,7 +1891,8 @@ export class Game {
       if (modal) stackItem.modeIndexes = modal.modes.map((_, i) => i);
     }
     this.stack.push(stackItem);
-    this.log(`${p.name} casts ${card.name}${stackItem.kicked ? ' (kicked)' : ''}${stackItem.buyback ? ' (with buyback)' : ''}${stackItem.entwined ? ' (entwined)' : ''}${free ? ' without paying its mana cost' : ''}.`);
+    p.spellsCastThisTurn = (p.spellsCastThisTurn || 0) + 1;
+    this.log(`${p.name} casts ${card.name}${stackItem.altCostKind ? ` (${stackItem.altCostKind})` : ''}${stackItem.kicked ? ' (kicked)' : ''}${stackItem.buyback ? ' (with buyback)' : ''}${stackItem.entwined ? ' (entwined)' : ''}${free ? ' without paying its mana cost' : ''}.`);
     this.triggerCastSpell(playerId, card);
     this.triggerBecomesTarget(targets);
     this.maybeCounterForWard(stackItem);
@@ -2009,6 +2032,11 @@ export class Game {
     try {
       // Afterlife N: "when this creature dies, create N 1/1 white and black
       // Spirit creature tokens with flying" — for its controller.
+      // Blitz: a blitzed creature has "when this creature dies, draw a card".
+      if (diedPerm.altCostKind === 'blitz') {
+        this.log(`${diedPerm.card.name} was blitzed — its controller draws a card.`);
+        this.drawCard(this.getPlayer(diedPerm.controllerId));
+      }
       const afterlife = this.keywordAmount(diedPerm.card, 'afterlife');
       if (afterlife > 0) this.applyTokenEffect({ controllerId: diedPerm.controllerId, card: diedPerm.card }, afterlife, 1, 1, 'white black spirit', 'flying');
       const diedControllerId = diedPerm.controllerId;
@@ -2163,6 +2191,13 @@ export class Game {
       perm.wasKicked = !!item.kicked;
       // Suspend: a creature cast when its last time counter came off has haste.
       if (item.viaSuspend && isCreature(card)) perm.tempKeywords.push('haste');
+      // Alternative costs that change the permanent itself.
+      perm.altCostKind = item.altCostKind || null;
+      if (item.altCostKind === 'dash' || item.altCostKind === 'blitz') perm.tempKeywords.push('haste');
+      if (item.altCostKind === 'prototype') {
+        const proto = getAlternativeCosts(card).find(a => a.kind === 'prototype');
+        if (proto) perm.protoStats = { power: proto.power, toughness: proto.toughness };
+      }
       // Compleated: a planeswalker enters with two fewer loyalty counters
       // for each Phyrexian symbol in its cost that was paid with life.
       if (item.phyrexianPaidWithLife && (card.keywords || []).includes('compleated') && perm.counters.loyalty != null) {
@@ -2204,6 +2239,12 @@ export class Game {
       }
       this.checkStateBasedActions();
       this.triggerETB(perm, item.xValue || 0);
+      // Evoke: "when it enters, sacrifice it" — after its own ETB triggers
+      // (Mulldrifter still draws its two cards).
+      if (perm.altCostKind === 'evoke' && this.findPermanent(perm.id)) {
+        this.log(`${card.name} was evoked and is sacrificed.`);
+        this.movePermanentToGraveyard(perm, { sacrifice: true });
+      }
       if (isSaga(card)) this.advanceSaga(perm);
       return;
     }
@@ -2948,6 +2989,63 @@ export class Game {
       if (i !== -1) p.hand.splice(i, 1);
     }
     return result.ok;
+  }
+
+  // ---------- alternative casting costs ----------
+  // Ways to cast `card` from hand for an alternative cost RIGHT NOW (the
+  // condition met and the cost affordable): [{ kind, manaCost, label,
+  // emergeVictimId? }]. Spectacle needs an opponent to have lost life this
+  // turn; Surge, another spell cast this turn; Prowl, a creature sharing a
+  // type to have dealt combat damage to a player; Freerunning, an Assassin
+  // or commander to have; Emerge sacrifices a creature and reduces the cost
+  // by its mana value (one option per creature you could sacrifice).
+  getCastOptions(playerId, card) {
+    const p = this.getPlayer(playerId);
+    const opp = this.opponentOf(playerId);
+    const subtypes = ((card.typeLine || '').toLowerCase().split('—')[1] || '').split(/\s+/).filter(Boolean);
+    const options = [];
+    for (const alt of getAlternativeCosts(card)) {
+      if (alt.kind === 'spectacle' && !(opp.life < (opp.lifeAtTurnStart ?? opp.life) || opp.damageTakenThisTurn > 0)) continue;
+      if (alt.kind === 'surge' && !(p.spellsCastThisTurn > 0)) continue;
+      if (alt.kind === 'prowl' && !subtypes.some(s => p.combatDamagerTypesThisTurn.includes(s))) continue;
+      if (alt.kind === 'freerunning' && !p.combatDamagerTypesThisTurn.some(s => s === 'assassin' || s === 'commander')) continue;
+      const label = `${alt.kind[0].toUpperCase()}${alt.kind.slice(1)} ${card.name} (${alt.manaCost}${alt.power ? `, ${alt.power}/${alt.toughness}` : ''})`;
+      const reduction = this.getCastCostReduction(card, playerId);
+      if (alt.kind === 'emerge') {
+        const victims = p.battlefield.filter(x => isCreature(x.card)).sort((a, b) => (b.card.cmc || 0) - (a.card.cmc || 0)).slice(0, 4);
+        for (const v of victims) {
+          const parsed = parseManaCost(alt.manaCost);
+          parsed.generic = Math.max(0, parsed.generic - reduction - (v.card.cmc || 0));
+          if (this.planSpellPayment(playerId, card, parsed, 0)) options.push({ ...alt, emergeVictimId: v.id, label: `Emerge ${card.name}, sacrificing ${v.card.name}` });
+        }
+        continue;
+      }
+      const parsed = parseManaCost(alt.manaCost);
+      parsed.generic = Math.max(0, parsed.generic - reduction);
+      if (this.planSpellPayment(playerId, card, parsed, 0)) options.push({ ...alt, label });
+    }
+    return options;
+  }
+
+  // At the beginning of the end step: a dashed creature returns to its
+  // owner's hand, a blitzed one is sacrificed. (Both are only ever cast at
+  // sorcery speed, so "the next end step" is always this turn's.)
+  endStepAltCostCleanup() {
+    for (const pl of this.players) {
+      for (const perm of pl.battlefield.filter(x => x.altCostKind === 'dash' || x.altCostKind === 'blitz')) {
+        if (perm.altCostKind === 'dash') {
+          pl.battlefield = pl.battlefield.filter(x => x.id !== perm.id);
+          this.detachFromLeavingBattlefield(perm);
+          this.triggerLeavesBattlefield(perm);
+          if (this.redirectCommanderToZone(perm)) continue;
+          this.getPlayer(perm.ownerId).hand.push(perm.card);
+          this.log(`${perm.card.name} returns to its owner's hand (dash).`);
+        } else {
+          this.log(`${perm.card.name} is sacrificed at the end step (blitz).`);
+          this.movePermanentToGraveyard(perm, { sacrifice: true });
+        }
+      }
+    }
   }
 
   // ---------- Suspend ----------
@@ -5543,7 +5641,7 @@ export class Game {
   // ---------- effective stats (base + counters + temp buffs + auras) ----------
 
   effectivePower(perm) {
-    let power = parseInt(perm.card.power, 10) || 0;
+    let power = parseInt(perm.protoStats?.power ?? perm.card.power, 10) || 0;
     power += this.auraBonus(perm, 'power');
     power += this.anthemBonus(perm, 'power');
     power += this.selfAttachmentBonus(perm, 'power');
@@ -5553,7 +5651,7 @@ export class Game {
   }
 
   effectiveToughness(perm) {
-    let t = parseInt(perm.card.toughness, 10) || 0;
+    let t = parseInt(perm.protoStats?.toughness ?? perm.card.toughness, 10) || 0;
     t += this.auraBonus(perm, 'toughness');
     t += this.anthemBonus(perm, 'toughness');
     t += this.selfAttachmentBonus(perm, 'toughness');
@@ -6213,6 +6311,15 @@ export class Game {
     const defenderPlayer = this.getPlayer(this.opponentOf(attackerPerm.controllerId).id);
     const kws = this.effectiveKeywords(attackerPerm);
     this.damagePlayer(defenderPlayer, amount, kws, attackerPerm.card.name);
+    // For Prowl/Freerunning: which creature types (and whether a commander)
+    // dealt combat damage to a player this turn.
+    if (amount > 0) {
+      const attackerOwner = this.getPlayer(attackerPerm.controllerId);
+      const subtypes = ((attackerPerm.card.typeLine || '').toLowerCase().split('—')[1] || '').split(/\s+/).filter(Boolean);
+      for (const st of [...subtypes, ...(isCommanderSource ? ['commander'] : [])]) {
+        if (!attackerOwner.combatDamagerTypesThisTurn.includes(st)) attackerOwner.combatDamagerTypesThisTurn.push(st);
+      }
+    }
     if (isCommanderSource) defenderPlayer.commanderDamageTaken += amount;
     // Toxic N: combat damage to a player also gives N poison counters.
     const toxic = this.keywordAmount(attackerPerm.card, 'toxic');

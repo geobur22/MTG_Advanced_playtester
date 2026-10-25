@@ -61,6 +61,10 @@ export async function fetchCardsByName(names) {
       // the browser (e.g. from a Node script, not just from setup.js).
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': 'mtg-game' },
       body: JSON.stringify({ identifiers: chunk.map(name => ({ name: lookupIdentifier(name) })) }),
+      // fetch has no timeout of its own: a stalled connection would hang
+      // deck loading forever (seen in long headless test runs). Fail
+      // loudly after 30s instead, so callers can report or retry.
+      signal: AbortSignal.timeout(30000),
     });
     if (!res.ok) throw new Error(`Scryfall request failed (${res.status})`);
     const data = await res.json();

@@ -196,6 +196,36 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
   return targets;
 }
 
+// Picks how to cast a hand card: { altCost: null } for its normal cost, {
+// altCost: { kind, emergeVictimId? } } for an alternative cost, or null if
+// it can't be cast at all right now. A strictly cheaper alternative
+// (Spectacle, Surge, Prowl, Freerunning, Dash, Prototype) wins — Dash only
+// in the first main phase, where its haste can still attack. Evoke only
+// when the normal cost isn't affordable AND the card has an enters/leaves
+// trigger worth having (Mulldrifter's draw). Emerge only by sacrificing a
+// token or a small creature (power 2 or less).
+function chooseCastWay(game, p, card) {
+  const normal = game.affordability(p.id, card);
+  const options = game.getCastOptions(p.id, card);
+  const cmcOf = (cost) => totalCmc(parseManaCost(cost));
+  const cheaper = options.filter(o => ['spectacle', 'surge', 'prowl', 'freerunning', 'dash', 'prototype'].includes(o.kind)
+    && (o.kind !== 'dash' || game.step === 'main1')
+    && cmcOf(o.manaCost) < (card.cmc || 0))
+    .sort((x, y) => cmcOf(x.manaCost) - cmcOf(y.manaCost))[0];
+  if (cheaper) return { altCost: { kind: cheaper.kind } };
+  const emerge = options.find(o => {
+    const v = o.kind === 'emerge' && game.findPermanent(o.emergeVictimId);
+    return v && (/\btoken\b/i.test(v.card.typeLine || '') || game.effectivePower(v) <= 2);
+  });
+  if (emerge && !normal) return { altCost: { kind: 'emerge', emergeVictimId: emerge.emergeVictimId } };
+  if (normal) return { altCost: null };
+  const evoke = options.find(o => o.kind === 'evoke');
+  if (evoke && /when this creature (?:enters|leaves)/i.test((card.oracleText || '').split(card.name).join('this creature'))) return { altCost: { kind: 'evoke' } };
+  const prototype = options.find(o => o.kind === 'prototype');
+  if (prototype) return { altCost: { kind: 'prototype' } };
+  return null;
+}
+
 export function takeAITurnAction(game) {
   if (game.gameOver) return;
   const p = game.priorityPlayer;
@@ -307,10 +337,18 @@ export function takeAITurnAction(game) {
       if (worthIt) { game.suspend(p.id, card.instanceId); return; }
     }
 
-    const playable = p.hand
-      .filter(c => !isLand(game, c) && game.canCastSpell(p.id, c) && game.affordability(p.id, c))
-      .sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
+    // How to cast each card: its normal cost, or an alternative cost
+    // (see chooseCastWay) — a card castable only through an alternative
+    // (an evoked Mulldrifter, a prototyped Fleshgorger) is still playable.
+    const castWays = new Map();
+    for (const c of p.hand) {
+      if (isLand(game, c) || !game.canCastSpell(p.id, c)) continue;
+      const way = chooseCastWay(game, p, c);
+      if (way) castWays.set(c, way);
+    }
+    const playable = [...castWays.keys()].sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
     for (const card of playable) {
+      const altCost = castWays.get(card).altCost;
       // Bloodthirst only pays off once the opponent has been dealt damage
       // this turn — so before combat, hold the creature for the second main
       // phase instead of casting it as a vanilla body. Still cast it in
@@ -361,7 +399,7 @@ export function takeAITurnAction(game) {
       // (An Entwine card's optional cost is entwine itself — only paid when
       // decided above, never just because it happens to be affordable.)
       const kicked = game.getEntwineCost(card) ? entwine : game.canAffordKicked(p.id, card);
-      const result = game.castSpell(p.id, card.instanceId, targets, xValue, modeIndexes, kicked);
+      const result = game.castSpell(p.id, card.instanceId, targets, xValue, modeIndexes, kicked, altCost ? { altCost } : {});
       if (result.ok) return;
     }
 

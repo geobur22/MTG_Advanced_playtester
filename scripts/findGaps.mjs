@@ -42,7 +42,8 @@ async function withRetry(fn, label) {
     try {
       return await fn();
     } catch (err) {
-      if (!/429/.test(err.message) || attempt === MAX_ATTEMPTS) throw err;
+      // Rate limits (429) and stalled connections (timeouts) are transient.
+      if (!/429|timeout|aborted/i.test(err.message) || attempt === MAX_ATTEMPTS) throw err;
       const delay = attempt * 5000;
       console.warn(`  (rate-limited loading ${label}, retrying in ${delay}ms...)`);
       await sleep(delay);

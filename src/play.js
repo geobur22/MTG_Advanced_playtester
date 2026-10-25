@@ -1249,6 +1249,12 @@ function handCardAlternatives(card) {
   if (suspend && game.canSuspend(HUMAN_ID, card.instanceId)) {
     options.push({ label: `Suspend ${suspend.time} — ${suspend.manaCost}`, execute: () => game.suspend(HUMAN_ID, card.instanceId) });
   }
+  // Alternative casting costs usable right now (Dash, Evoke, Spectacle, ...).
+  if (!game.isLand(card) && game.canCastSpell(HUMAN_ID, card)) {
+    for (const opt of game.getCastOptions(HUMAN_ID, card)) {
+      options.push({ label: opt.label, execute: () => handleHandCardClick(card, { skipCycleChoice: true, altCost: { kind: opt.kind, emergeVictimId: opt.emergeVictimId } }) });
+    }
+  }
   const transmute = game.getTransmuteCost(card);
   if (transmute && game.canTransmute(HUMAN_ID, card.instanceId)) {
     options.push({ label: `Transmute ${transmute}`, execute: () => game.transmute(HUMAN_ID, card.instanceId) });
@@ -1256,7 +1262,7 @@ function handCardAlternatives(card) {
   return options;
 }
 
-async function handleHandCardClick(card, { skipCycleChoice = false } = {}) {
+async function handleHandCardClick(card, { skipCycleChoice = false, altCost = null } = {}) {
   if (game.gameOver || watchMode) return;
   if (ui.abilityChoice || ui.equipChoice) return; // must Cancel or pick first
 
@@ -1315,7 +1321,7 @@ async function handleHandCardClick(card, { skipCycleChoice = false } = {}) {
     return;
   }
 
-  if (!isHandCardPlayable(card)) return;
+  if (!altCost && !isHandCardPlayable(card)) return;
 
   const modal = game.getSpellModes(card);
   let modeIndexes = null;
@@ -1365,11 +1371,11 @@ async function handleHandCardClick(card, { skipCycleChoice = false } = {}) {
   }
 
   if (kinds.length === 0) {
-    game.castSpell(HUMAN_ID, card.instanceId, [], xValue, modeIndexes, kicked);
+    game.castSpell(HUMAN_ID, card.instanceId, [], xValue, modeIndexes, kicked, altCost ? { altCost } : {});
     return;
   }
 
-  ui.targeting = { card, kinds, collected: [], xValue, modeIndexes, kicked };
+  ui.targeting = { card, kinds, collected: [], xValue, modeIndexes, kicked, altCost };
   render();
 }
 
@@ -1515,7 +1521,7 @@ function handleTargetPick(target) {
       else if (t.source === 'commander') game.castCommander(HUMAN_ID, t.collected, t.xValue || 0);
       else if (t.fromExile) game.playCardFromExile(HUMAN_ID, t.fromExile, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null });
       else if (t.fromGraveyard) game.castFromGraveyard(HUMAN_ID, t.fromGraveyard.cardInstanceId, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null, viaEscape: t.fromGraveyard.viaEscape });
-      else game.castSpell(HUMAN_ID, t.card.instanceId, t.collected, t.xValue || 0, t.modeIndexes || null, t.kicked || false);
+      else game.castSpell(HUMAN_ID, t.card.instanceId, t.collected, t.xValue || 0, t.modeIndexes || null, t.kicked || false, t.altCost ? { altCost: t.altCost } : {});
     } else {
       render();
     }
