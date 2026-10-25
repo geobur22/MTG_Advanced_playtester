@@ -335,6 +335,12 @@ function chooseCastWay(game, p, card) {
   if (evoke && /when this creature (?:enters|leaves)/i.test((card.oracleText || '').split(card.name).join('this creature'))) return { altCost: { kind: 'evoke' } };
   const prototype = options.find(o => o.kind === 'prototype');
   if (prototype) return { altCost: { kind: 'prototype' } };
+  // Warp: a cheap cast now for the enters trigger (the creature is exiled
+  // at end of turn and can be recast later) — only when the normal cost
+  // isn't affordable and there's an ETB worth having, in main 1 so it can
+  // also attack if it has haste.
+  const warp = options.find(o => o.kind === 'warp');
+  if (warp && /when this creature enters/i.test((card.oracleText || '').split(card.name).join('this creature'))) return { altCost: { kind: 'warp' } };
   return null;
 }
 
@@ -390,14 +396,16 @@ export function takeAITurnAction(game) {
         if (result.ok) return;
         continue;
       }
-      if (!game.canCastSpell(p.id, card) || !game.affordability(p.id, card)) continue;
+      // (canPlayFromExile also covers foretold/plotted/warped cards' own
+      // costs and timing.)
+      if (!game.canPlayFromExile(p.id, entry.id)) continue;
       const modal = game.getSpellModes(card);
       let modeIndexes = null;
       if (modal) {
         modeIndexes = pickModesFor(game, modal, card, p.id);
         if (!modeIndexes) continue;
       }
-      const hasX = /\{X\}/i.test(card.manaCost || '');
+      const hasX = /\{X\}/i.test(card.manaCost || '') && !entry.free;
       const xValue = hasX ? game.maxAffordableX(p.id, card) : 0;
       if (hasX && xValue === 0) continue;
       const kinds = game.getRequiredTargetKinds(card, modeIndexes);
@@ -407,13 +415,19 @@ export function takeAITurnAction(game) {
       if (result.ok) return;
     }
 
-    // Flashback/Escape — a card sitting in the graveyard with either cost
-    // is otherwise permanently wasted value once it's died/been cast
-    // normally, so try both (Escape checked second since it also consumes
-    // other graveyard cards, a real cost Flashback doesn't have).
+    // Casting from the graveyard (Flashback, Escape, Jump-start, Retrace,
+    // Mayhem) — a card sitting there is otherwise wasted value. Ways that
+    // only cost mana come first; Escape (eats other graveyard cards) and
+    // Jump-start (discards a real card) after; Retrace only by discarding
+    // a land the AI can spare.
+    const order = { flashback: 0, mayhem: 0, retrace: 1, escape: 2, jumpstart: 3 };
+    const myLands = p.battlefield.filter(perm => isLand(game, perm.card)).length;
     for (const card of [...p.graveyard]) {
-      for (const viaEscape of [false, true]) {
-        if (!game.canCastFromGraveyard(p.id, card.instanceId, { viaEscape })) continue;
+      const ways = game.getGraveyardCastWays(p.id, card.instanceId).sort((a, b) => order[a.via] - order[b.via]);
+      for (const way of ways) {
+        if (way.via === 'retrace' && myLands < 4) continue;
+        if (way.via === 'jumpstart' && !game.discardFodder(p).some(c => isLand(game, c) && myLands >= 5)) continue;
+        const viaEscape = way.via === 'escape';
         const modal = game.getSpellModes(card);
         let modeIndexes = null;
         if (modal) {
@@ -423,7 +437,7 @@ export function takeAITurnAction(game) {
         const kinds = game.getRequiredTargetKinds(card, modeIndexes);
         const targets = pickTargetsForKinds(game, card, p.id, kinds).filter(Boolean);
         if (game.getMinRequiredTargetCount(card, modeIndexes) > targets.length) continue;
-        const result = game.castFromGraveyard(p.id, card.instanceId, { targets, modeIndexes, viaEscape });
+        const result = game.castFromGraveyard(p.id, card.instanceId, { targets, modeIndexes, via: way.via, viaEscape });
         if (result.ok) return;
       }
     }
@@ -635,7 +649,7 @@ export function takeAITurnAction(game) {
     for (const entry of game.getGraveyardAbilities(p.id)) {
       // An unearthed creature is exiled at this turn's end step, so its
       // whole value is attacking this turn — after combat it's pure waste.
-      if (entry.abilities[0].unearth && game.step !== 'main1') continue;
+      if ((entry.abilities[0].unearth || entry.abilities[0].encore) && game.step !== 'main1') continue;
       if (!game.canActivateGraveyardAbility(p.id, entry.card.instanceId)) continue;
       // Scavenge: grow our own biggest creature; never feed the opponent's.
       let targets = [];
@@ -647,6 +661,21 @@ export function takeAITurnAction(game) {
       }
       const result = game.activateGraveyardAbility(p.id, entry.card.instanceId, targets);
       if (result.ok) return;
+    }
+
+    // Foretell / Plot with mana left over after everything above (nothing
+    // else got cast): set up a cheaper (foretell) or free (plot) cast for a
+    // later turn. Only in main 2, so main 1 mana goes to real spells first.
+    if (game.step === 'main2') {
+      for (const card of p.hand) {
+        const foretell = game.getForetellCost(card);
+        if (foretell && game.canForetell(p.id, card.instanceId) && totalCmc(parseManaCost(foretell)) <= (card.cmc || 0)) {
+          if (game.foretell(p.id, card.instanceId).ok) return;
+        }
+        if (game.getPlotCost(card) && game.canPlot(p.id, card.instanceId)) {
+          if (game.plot(p.id, card.instanceId).ok) return;
+        }
+      }
     }
 
     // Cycle away dead cards with mana left over after everything above: a

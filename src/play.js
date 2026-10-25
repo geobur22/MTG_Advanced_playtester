@@ -342,7 +342,8 @@ function renderGraveyardView() {
       btn.type = 'button';
       btn.className = 'action-button primary graveyard-activate-button';
       const gyAbility = game.getGraveyardAbilities(HUMAN_ID).find(e => e.card.instanceId === card.instanceId)?.abilities[0];
-      btn.textContent = gyAbility?.unearth ? `Unearth ${gyAbility.manaCost}` : gyAbility?.scavenge ? `Scavenge ${gyAbility.manaCost}` : 'Activate';
+      const gyKind = ['unearth', 'scavenge', 'embalm', 'eternalize', 'encore'].find(k => gyAbility?.[k]);
+      btn.textContent = gyKind ? `${gyKind[0].toUpperCase()}${gyKind.slice(1)} ${gyAbility.manaCost}` : 'Activate';
       btn.addEventListener('click', () => {
         if (ui.abilityChoice || ui.equipChoice || ui.ninjutsuChoice || ui.targeting || game.pendingRequest) return;
         if (gyAbility?.targetKinds) {
@@ -356,23 +357,17 @@ function renderGraveyardView() {
     }
     // Flashback and Escape — casting straight out of the graveyard on an
     // alternative cost (see game.js's castFromGraveyard).
+    // (Also Jump-start, Retrace, and Mayhem — one button per way it can be
+    // cast from here right now.)
     if (player.id === HUMAN_ID && !watchMode) {
-      const flashbackCost = game.getFlashbackCost(card);
-      if (flashbackCost && game.canCastFromGraveyard(HUMAN_ID, card.instanceId, { viaEscape: false })) {
+      const LABEL = { flashback: 'Flashback', escape: 'Escape', jumpstart: 'Jump-start', retrace: 'Retrace', mayhem: 'Mayhem' };
+      for (const way of game.getGraveyardCastWays(HUMAN_ID, card.instanceId)) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'action-button primary graveyard-activate-button';
-        btn.textContent = `Flashback ${flashbackCost}`;
-        btn.addEventListener('click', () => handleGraveyardCastClick(card, { viaEscape: false }));
-        div.appendChild(btn);
-      }
-      const escapeCost = game.getEscapeCost(card);
-      if (escapeCost && game.canCastFromGraveyard(HUMAN_ID, card.instanceId, { viaEscape: true })) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'action-button primary graveyard-activate-button';
-        btn.textContent = `Escape ${escapeCost.manaCost} (exile ${escapeCost.exileCount})`;
-        btn.addEventListener('click', () => handleGraveyardCastClick(card, { viaEscape: true }));
+        const extra = way.exileCount ? ` (exile ${way.exileCount})` : way.discard === 'land' ? ' + discard a land' : way.discard ? ' + discard a card' : '';
+        btn.textContent = `${LABEL[way.via]} ${way.manaCost}${extra}`;
+        btn.addEventListener('click', () => handleGraveyardCastClick(card, { via: way.via, discard: way.discard }));
         div.appendChild(btn);
       }
     }
@@ -386,10 +381,19 @@ function renderGraveyardView() {
 // Neither mechanic here supports an {X} cost or Kicker on top (no real
 // card combines them), so unlike handleHandCardClick there's no X/kicker
 // prompt to add.
-async function handleGraveyardCastClick(card, { viaEscape }) {
+async function handleGraveyardCastClick(card, { via, discard = null }) {
   if (game.gameOver || watchMode) return;
   if (ui.abilityChoice || ui.equipChoice || ui.ninjutsuChoice || ui.targeting || game.pendingRequest) return;
-  if (!game.canCastFromGraveyard(HUMAN_ID, card.instanceId, { viaEscape })) return;
+  if (!game.canCastFromGraveyard(HUMAN_ID, card.instanceId, { via })) return;
+  const viaEscape = via === 'escape';
+  // Jump-start / Retrace: pick the card (or land) to discard.
+  let discardId = null;
+  if (discard) {
+    const pool = game.getPlayer(HUMAN_ID).hand.filter(c => discard !== 'land' || game.isLand(c));
+    const pick = await pickCardFromList(`Discard which ${discard === 'land' ? 'land card' : 'card'} to cast ${card.name}?`, pool);
+    if (!pick) return;
+    discardId = pick.instanceId;
+  }
 
   const modal = game.getSpellModes(card);
   let modeIndexes = null;
@@ -400,12 +404,13 @@ async function handleGraveyardCastClick(card, { viaEscape }) {
 
   const kinds = game.getRequiredTargetKinds(card, modeIndexes);
   if (kinds.length === 0) {
-    game.castFromGraveyard(HUMAN_ID, card.instanceId, { modeIndexes, viaEscape });
+    const result = game.castFromGraveyard(HUMAN_ID, card.instanceId, { modeIndexes, via, viaEscape, discardId });
+    if (!result.ok) await showAlert(result.reason);
     render();
     return;
   }
 
-  ui.targeting = { card, kinds, collected: [], xValue: 0, modeIndexes, fromGraveyard: { cardInstanceId: card.instanceId, viaEscape } };
+  ui.targeting = { card, kinds, collected: [], xValue: 0, modeIndexes, fromGraveyard: { cardInstanceId: card.instanceId, viaEscape, via, discardId } };
   render();
 }
 
@@ -602,6 +607,12 @@ function renderPlayerBar(container, player, isOpponent) {
   }
 
   // Suspended cards are public information: name and time counters left.
+  if ((player.rebounding || []).length > 0) {
+    const reb = document.createElement('span');
+    reb.className = 'stat';
+    reb.textContent = 'Rebound (next upkeep): ' + player.rebounding.map(c => c.name).join(', ');
+    container.appendChild(reb);
+  }
   if ((player.suspended || []).length > 0) {
     const susp = document.createElement('span');
     susp.className = 'stat';
@@ -954,7 +965,11 @@ function renderHand(human) {
     attachHoverTooltip(div, entry.card);
     const badge = document.createElement('div');
     badge.className = 'exiled-badge';
-    badge.textContent = `Exiled — ${entry.remainingOwnTurns} of your turn${entry.remainingOwnTurns === 1 ? '' : 's'} left`;
+    const laterTurn = entry.notOnTurn === game.turnNumber ? ' (next turn)' : '';
+    badge.textContent = entry.kind === 'foretell' ? `Foretold — cast for ${entry.costOverride}${laterTurn}`
+      : entry.kind === 'plot' ? `Plotted — cast free at sorcery speed${laterTurn}`
+      : entry.kind === 'warp' ? `Warped — cast from exile${laterTurn}`
+      : `Exiled — ${entry.remainingOwnTurns} of your turn${entry.remainingOwnTurns === 1 ? '' : 's'} left`;
     div.appendChild(badge);
     div.addEventListener('click', () => handleExiledCardClick(entry));
     container.appendChild(div);
@@ -1255,6 +1270,14 @@ function handCardAlternatives(card) {
       options.push({ label: opt.label, execute: () => handleHandCardClick(card, { skipCycleChoice: true, altCost: { kind: opt.kind, emergeVictimId: opt.emergeVictimId } }) });
     }
   }
+  const foretell = game.getForetellCost(card);
+  if (foretell && game.canForetell(HUMAN_ID, card.instanceId)) {
+    options.push({ label: `Foretell (pay {2}; cast later for ${foretell})`, execute: () => game.foretell(HUMAN_ID, card.instanceId) });
+  }
+  const plot = game.getPlotCost(card);
+  if (plot && game.canPlot(HUMAN_ID, card.instanceId)) {
+    options.push({ label: `Plot ${plot} (cast free on a later turn)`, execute: () => game.plot(HUMAN_ID, card.instanceId) });
+  }
   const transmute = game.getTransmuteCost(card);
   if (transmute && game.canTransmute(HUMAN_ID, card.instanceId)) {
     options.push({ label: `Transmute ${transmute}`, execute: () => game.transmute(HUMAN_ID, card.instanceId) });
@@ -1428,6 +1451,20 @@ async function chooseCastExtras(card, modeIndexes) {
   return extras;
 }
 
+// A numbered pick from a list of cards in hand. Returns the card, or null
+// if cancelled.
+async function pickCardFromList(question, cards) {
+  if (!cards.length) return null;
+  const list = cards.map((c, i) => `${i + 1}. ${c.name}`).join('\n');
+  while (true) {
+    const input = await showPrompt(`${question}\n${list}\n\nEnter a number:`, '1');
+    if (input === null) return null;
+    const i = parseInt(input, 10);
+    if (i >= 1 && i <= cards.length) return cards[i - 1];
+    await showAlert('Enter one of the listed numbers.');
+  }
+}
+
 // A numbered pick from up to nine permanents (0 = none). Returns the
 // permanent, null for "none", or undefined if cancelled. Skips the prompt
 // when there's nothing to pick.
@@ -1591,7 +1628,7 @@ function handleTargetPick(target) {
       else if (t.source === 'graveyardAbility') game.activateGraveyardAbility(HUMAN_ID, t.cardInstanceId, t.collected);
       else if (t.source === 'commander') game.castCommander(HUMAN_ID, t.collected, t.xValue || 0);
       else if (t.fromExile) game.playCardFromExile(HUMAN_ID, t.fromExile, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null });
-      else if (t.fromGraveyard) game.castFromGraveyard(HUMAN_ID, t.fromGraveyard.cardInstanceId, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null, viaEscape: t.fromGraveyard.viaEscape });
+      else if (t.fromGraveyard) game.castFromGraveyard(HUMAN_ID, t.fromGraveyard.cardInstanceId, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null, viaEscape: t.fromGraveyard.viaEscape, via: t.fromGraveyard.via, discardId: t.fromGraveyard.discardId });
       else {
         const result = game.castSpell(HUMAN_ID, t.card.instanceId, t.collected, t.xValue || 0, t.modeIndexes || null, t.kicked || false, { ...(t.altCost ? { altCost: t.altCost } : {}), extras: t.extras || {} });
         if (!result.ok) showAlert(result.reason);

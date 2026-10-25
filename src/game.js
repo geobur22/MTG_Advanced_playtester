@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -563,7 +563,13 @@ export class Game {
 
   // ---------- zones / drawing ----------
 
-  drawCard(player, silent = false) {
+  drawCard(player, silent = false, { noDredge = false } = {}) {
+    // Dredge replaces a draw (AI only here — a human is offered it for the
+    // draw step's draw; see the draw step in advanceStep).
+    if (!silent && !noDredge && player.isAI) {
+      const dredgeCard = this.aiDredgeChoice(player);
+      if (dredgeCard && this.dredge(player, dredgeCard)) return;
+    }
     if (player.library.length === 0) {
       this.loseGame(player.id, 'tried to draw from an empty library');
       return;
@@ -1132,13 +1138,14 @@ export class Game {
       // "This turn" is a shared, global concept (only one turn happens at a
       // time) — a new turn beginning resets it for BOTH players, not just
       // whoever's turn it now is.
-      for (const pl of this.players) { pl.damageTakenThisTurn = 0; pl.cardsDrawnThisTurn = 0; pl.spellsCastThisTurn = 0; pl.lifeAtTurnStart = pl.life; pl.combatDamagerTypesThisTurn = []; }
+      for (const pl of this.players) { pl.damageTakenThisTurn = 0; pl.cardsDrawnThisTurn = 0; pl.spellsCastThisTurn = 0; pl.lifeAtTurnStart = pl.life; pl.combatDamagerTypesThisTurn = []; pl.discardedThisTurn = []; }
       this.leftBattlefieldThisTurn = [];
       this.advanceStep();
       return;
     }
     if (step === 'upkeep') {
       this.tickSuspended();
+      this.tickRebound();
       this.triggerPhase(interpretUpkeepTriggers);
       this.triggerEnchantedPlayerUpkeep();
       this.openPriorityWindow();
@@ -1146,7 +1153,14 @@ export class Game {
     }
     if (step === 'draw') {
       const skip = this._firstTurn && this.activePlayerIndex === 0;
-      if (!skip) this.drawCard(this.active);
+      const dredgeable = !skip && !this.active.isAI ? this.dredgeOptions(this.active) : [];
+      if (dredgeable.length) {
+        const pl = this.active;
+        this.requestChoice(pl.id, 'Draw step: draw, or dredge instead?', [
+          { label: 'Draw a card', resolve: () => this.drawCard(pl, false, { noDredge: true }) },
+          ...dredgeable.slice(0, 6).map(c => ({ label: `Dredge ${c.name} (mill ${getDredgeAmount(c)})`, resolve: () => this.dredge(pl, c) })),
+        ]);
+      } else if (!skip) this.drawCard(this.active);
       else this.log(`${this.active.name} skips their first draw (going first).`);
       // A genuinely new trigger dispatch point (Mana Vault's own "at the
       // beginning of your draw step, if this artifact is tapped, deals 1
@@ -1822,7 +1836,7 @@ export class Game {
   // (see getKickerCost) — folded into the mana payment below, and recorded
   // on the resulting permanent as `wasKicked` (see resolveTop) for its own
   // "if it was kicked, ..." ETB trigger to read back.
-  castSpell(playerId, instanceId, targets = [], xValue = 0, modeIndexes = null, kicked = false, { free = false, bypassTiming = false, ownerId = null, costOverride = null, viaSuspend = false, altCost = null, extras = {} } = {}) {
+  castSpell(playerId, instanceId, targets = [], xValue = 0, modeIndexes = null, kicked = false, { free = false, bypassTiming = false, ownerId = null, costOverride = null, viaSuspend = false, altCost = null, extras = {}, fromZone = 'hand' } = {}) {
     const p = this.getPlayer(playerId);
     const idx = p.hand.findIndex(c => c.instanceId === instanceId);
     if (idx === -1) return { ok: false, reason: 'Card not in hand.' };
@@ -1915,6 +1929,8 @@ export class Game {
       isAura: isAura(card),
       bargained: ex.bargained,
       gift: ex.gift,
+      // Where it was cast from — Rebound only applies to a spell cast from hand.
+      fromZone,
       squadCount: ex.squad,
       offspring: ex.offspring,
     };
@@ -1996,11 +2012,9 @@ export class Game {
   payCastExtras(playerId, card, ex) {
     const p = this.getPlayer(playerId);
     for (const c of ex.discards) {
-      const i = p.hand.indexOf(c);
-      if (i === -1) continue;
-      p.hand.splice(i, 1);
-      p.graveyard.push(c);
+      if (!p.hand.includes(c)) continue;
       this.log(`${p.name} discards ${c.name} to escalate ${card.name}.`);
+      this.discardCard(p, c);
     }
     for (const id of ex.tapIds) {
       const perm = this.findPermanent(id);
@@ -2555,7 +2569,7 @@ export class Game {
     // a graveyard" (Increasing Confusion's own doubled mill) — set whenever
     // this resolution came from castFromGraveyard's Flashback/Escape path.
     const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift };
-    this.resolveEffectSteps(interpretSpell(card, item.modeIndexes, flags), item.targets, { controllerId, card, xValue: item.xValue, castFromGraveyard: !!(item.viaFlashback || item.viaEscape) });
+    this.resolveEffectSteps(interpretSpell(card, item.modeIndexes, flags), item.targets, { controllerId, card, xValue: item.xValue, castFromGraveyard: !!(item.viaFlashback || item.viaEscape || item.fromZone === 'graveyard') });
     // A copy of a spell ceases to exist instead of going anywhere.
     if (item.isCopy) {
       this.checkStateBasedActions();
@@ -2568,6 +2582,11 @@ export class Game {
     if (item.viaFlashback || item.viaEscape) {
       p.exile.push(card);
       this.log(`${card.name} is exiled instead of returning to the graveyard (cast from the graveyard).`);
+    } else if (hasRebound(card) && item.fromZone === 'hand' && !item.viaRebound) {
+      // Rebound: cast from hand, so exile it as it resolves; it can be cast
+      // free from exile at its controller's next upkeep (see tickRebound).
+      (p.rebounding ||= []).push(card);
+      this.log(`${card.name} is exiled (rebound) — it can be cast again at ${p.name}'s next upkeep.`);
     } else if (item.exileToOwnerId) {
       // Diluvian Primordial's own "if a spell cast this way would be put
       // into a graveyard, exile it instead" — the card's owner is whoever
@@ -3168,6 +3187,7 @@ export class Game {
       const sorcerySpeedOk = p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0;
       if (!sorcerySpeedOk) return false;
     }
+    // Encore makes a token for each opponent; it needs one to exist.
     // Scavenge needs some creature to target at all.
     if (ability.scavenge && !this.players.some(pl => pl.battlefield.some(perm => isCreature(perm.card) && this.canBeTargetedBy(perm, playerId)))) return false;
     const parsed = parseManaCost(ability.manaCost);
@@ -3194,6 +3214,32 @@ export class Game {
     for (const land of payment.lands) land.tapped = true;
     for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
     p.graveyard.splice(idx, 1);
+    if (ability.embalm || ability.eternalize || ability.encore) {
+      // Exiling the card is part of the cost. Embalm: a white Zombie token
+      // copy with no mana cost. Eternalize: the same but a 4/4 black
+      // Zombie. Encore: for each opponent, a token copy with haste that
+      // attacks that opponent this turn and is sacrificed at the next end
+      // step.
+      p.exile.push(card);
+      const kind = ability.embalm ? 'embalm' : ability.eternalize ? 'eternalize' : 'encore';
+      this.log(`${p.name} ${kind === 'embalm' ? 'embalms' : kind === 'eternalize' ? 'eternalizes' : 'encores'} ${card.name}.`);
+      const base = { ...card, manaCost: kind === 'encore' ? card.manaCost : '', cmc: kind === 'encore' ? card.cmc : 0 };
+      if (kind !== 'encore') {
+        const [types, subtypes = ''] = (card.typeLine || '').split('—').map(x => x.trim());
+        base.typeLine = `${types} — Zombie${subtypes ? ` ${subtypes}` : ''}`;
+        base.colors = [kind === 'embalm' ? 'W' : 'B'];
+      }
+      const count = kind === 'encore' ? this.players.filter(pl => pl.id !== playerId && !pl.lost).length : 1;
+      for (let i = 0; i < count; i++) {
+        const perm = this.createTokenCopy(base, playerId, kind === 'eternalize' ? { power: 4, toughness: 4 } : null);
+        if (kind === 'encore') {
+          perm.tempKeywords.push('haste');
+          perm.sacrificeAtEndStep = true;
+        }
+      }
+      this.afterAction(playerId);
+      return { ok: true };
+    }
     if (ability.scavenge) {
       // Exiling the card is part of the cost, so it's gone even if Ward
       // then counters the ability.
@@ -3250,9 +3296,8 @@ export class Game {
     const payment = planManaPayment(untapped, parseManaCost(cycling.manaCost), 0, p.manaPool);
     for (const land of payment.lands) land.tapped = true;
     for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
-    p.hand.splice(idx, 1);
-    p.graveyard.push(card);
     this.log(`${p.name} cycles ${card.name} (${cycling.manaCost}).`);
+    this.discardCard(p, card);
     const ctx = { controllerId: playerId, card };
     // A "when you cycle" trigger that needs a target isn't modeled — there's
     // no hand-zone source to drive a targeting prompt from — so only
@@ -3285,7 +3330,7 @@ export class Game {
     const targets = pickTargetsForKinds(this, card, playerId, kinds).filter(Boolean);
     let result = { ok: false };
     if (this.getMinRequiredTargetCount(card) <= targets.length) {
-      result = this.castSpell(playerId, card.instanceId, targets, castOpts.xValue || 0, null, false, { bypassTiming: true, ...castOpts });
+      result = this.castSpell(playerId, card.instanceId, targets, castOpts.xValue || 0, null, false, { bypassTiming: true, fromZone: wasInHand ? 'hand' : 'other', ...castOpts });
     }
     if (!result.ok && !wasInHand) {
       const i = p.hand.findIndex(c => c.instanceId === card.instanceId);
@@ -3335,6 +3380,21 @@ export class Game {
   // sorcery speed, so "the next end step" is always this turn's.)
   endStepAltCostCleanup() {
     for (const pl of this.players) {
+      // Encore tokens are sacrificed at the next end step.
+      for (const perm of pl.battlefield.filter(x => x.sacrificeAtEndStep)) {
+        this.log(`${perm.card.name} is sacrificed at the end step (encore).`);
+        this.movePermanentToGraveyard(perm, { sacrifice: true });
+      }
+      // Warp: exiled at the next end step, then castable from exile on a
+      // later turn (for its normal cost).
+      for (const perm of pl.battlefield.filter(x => x.altCostKind === 'warp')) {
+        pl.battlefield = pl.battlefield.filter(x => x.id !== perm.id);
+        this.detachFromLeavingBattlefield(perm);
+        this.triggerLeavesBattlefield(perm);
+        if (isTokenCard(perm.card) || this.redirectCommanderToZone(perm)) continue;
+        this.getPlayer(perm.ownerId).exiledPlayable.push({ id: uid('exile'), card: perm.card, remainingOwnTurns: Infinity, kind: 'warp', notOnTurn: this.turnNumber });
+        this.log(`${perm.card.name} is exiled (warp) — it can be cast from exile on a later turn.`);
+      }
       for (const perm of pl.battlefield.filter(x => x.altCostKind === 'dash' || x.altCostKind === 'blitz')) {
         if (perm.altCostKind === 'dash') {
           pl.battlefield = pl.battlefield.filter(x => x.id !== perm.id);
@@ -3350,6 +3410,159 @@ export class Game {
       }
     }
   }
+
+  // ---------- Rebound ----------
+  // At the beginning of your upkeep, each card you rebounded may be cast
+  // from exile without paying its mana cost. The AI always does (if it
+  // has targets); a human chooses. Not cast: it stays in exile.
+  tickRebound() {
+    const p = this.active;
+    const cards = p.rebounding || [];
+    if (!cards.length) return;
+    p.rebounding = [];
+    for (const card of cards) {
+      const castIt = () => {
+        if (!this.castFromOutsideHand(p.id, card, { free: true, fromZone: 'exile', viaRebound: true })) {
+          this.log(`${card.name} can't be cast from rebound right now; it stays in exile.`);
+          p.exile.push(card);
+          return;
+        }
+        const item = this.stack.find(x => x.card === card);
+        if (item) item.viaRebound = true;
+        this.log(`${p.name} casts ${card.name} from exile (rebound).`);
+      };
+      this.requestChoice(p.id, `${card.name} — Rebound`, [
+        { label: `Cast ${card.name} for free`, resolve: castIt },
+        { label: 'Leave it in exile', resolve: () => p.exile.push(card) },
+      ], 0);
+    }
+  }
+
+  // ---------- Dredge ----------
+  // "If you would draw a card, you may mill N cards instead. If you do,
+  // return this card from your graveyard to your hand." Needs N cards in
+  // the library. The AI dredges any non-land dredge card while its library
+  // is comfortably deep; a human is offered it for the draw step's draw.
+  dredgeOptions(player) {
+    return player.graveyard.filter(c => { const n = getDredgeAmount(c); return n > 0 && player.library.length >= n; });
+  }
+
+  aiDredgeChoice(player) {
+    return this.dredgeOptions(player)
+      .filter(c => !isLand(c) && player.library.length >= getDredgeAmount(c) + 10)
+      .sort((a, b) => (b.cmc || 0) - (a.cmc || 0))[0] || null;
+  }
+
+  dredge(player, card) {
+    const n = getDredgeAmount(card);
+    const i = player.graveyard.indexOf(card);
+    if (i === -1 || player.library.length < n) return false;
+    player.graveyard.splice(i, 1);
+    const milled = player.library.splice(0, n);
+    player.graveyard.push(...milled);
+    player.hand.push(card);
+    this.log(`${player.name} dredges ${card.name} (mills ${n}) instead of drawing.`);
+    return true;
+  }
+
+  // ---------- Recover ----------
+  // "When a creature is put into your graveyard from the battlefield, you
+  // may pay [cost]. If you do, return this card from your graveyard to
+  // your hand. Otherwise, exile this card." AI pays when it can.
+  triggerRecover(owner, diedCard) {
+    for (const card of owner.graveyard.filter(c => c !== diedCard && getRecoverCost(c))) {
+      const cost = getRecoverCost(card);
+      const payBack = () => {
+        const i = owner.graveyard.indexOf(card);
+        if (i === -1) return;
+        const parsed = parseManaCost(cost);
+        const payment = this.planSpellPayment(owner.id, card, parsed, 0);
+        if (!payment) return exile();
+        this.applySpellPayment(owner.id, card, payment);
+        owner.graveyard.splice(i, 1);
+        owner.hand.push(card);
+        this.log(`${owner.name} pays ${cost} to recover ${card.name} to their hand.`);
+      };
+      const exile = () => {
+        const i = owner.graveyard.indexOf(card);
+        if (i === -1) return;
+        owner.graveyard.splice(i, 1);
+        owner.exile.push(card);
+        this.log(`${card.name} is exiled (recover not paid).`);
+      };
+      const affordable = !!this.planSpellPayment(owner.id, card, parseManaCost(cost), 0);
+      this.requestChoice(owner.id, `${diedCard.name} died — Recover ${card.name} for ${cost}?`, [
+        { label: `Pay ${cost} and return ${card.name} to hand`, resolve: payBack },
+        { label: `Exile ${card.name}`, resolve: exile },
+      ], affordable ? 0 : 1);
+    }
+  }
+
+  // ---------- Foretell / Plot ----------
+  // Foretell: during your turn, pay {2} and exile the card from your hand
+  // face down; cast it on a later turn for its foretell cost. Plot: pay the
+  // plot cost and exile it (sorcery speed); cast it free, as a sorcery, on
+  // a later turn. Both live in exiledPlayable (see playCardFromExile).
+  canForetell(playerId, instanceId) {
+    if (this.gameOver || this.pendingRequest || this.priorityPlayer.id !== playerId || this.active.id !== playerId) return false;
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    return !!(card && getForetellCost(card) && this.payableNow(playerId, '{2}'));
+  }
+
+  foretell(playerId, instanceId) {
+    if (!this.canForetell(playerId, instanceId)) return { ok: false, reason: "Can't foretell that right now." };
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    this.payNow(playerId, '{2}');
+    p.hand.splice(p.hand.indexOf(card), 1);
+    p.exiledPlayable.push({ id: uid('exile'), card, remainingOwnTurns: Infinity, kind: 'foretell', costOverride: getForetellCost(card), notOnTurn: this.turnNumber });
+    this.log(`${p.name} foretells a card (exiled face down).`);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  canPlot(playerId, instanceId) {
+    if (this.gameOver || this.pendingRequest || this.priorityPlayer.id !== playerId) return false;
+    const p = this.getPlayer(playerId);
+    if (!(p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    return !!(card && getPlotCost(card) && this.payableNow(playerId, getPlotCost(card)));
+  }
+
+  plot(playerId, instanceId) {
+    if (!this.canPlot(playerId, instanceId)) return { ok: false, reason: "Can't plot that right now." };
+    const p = this.getPlayer(playerId);
+    const card = p.hand.find(c => c.instanceId === instanceId);
+    this.payNow(playerId, getPlotCost(card));
+    p.hand.splice(p.hand.indexOf(card), 1);
+    p.exiledPlayable.push({ id: uid('exile'), card, remainingOwnTurns: Infinity, kind: 'plot', free: true, sorceryOnly: true, notOnTurn: this.turnNumber });
+    this.log(`${p.name} plots ${card.name}.`);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  // Paying a plain mana cost outside of casting (foretell's {2}, a plot
+  // cost) — lands and the mana pool only.
+  payableNow(playerId, cost) {
+    const p = this.getPlayer(playerId);
+    const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
+    return !!planManaPayment(untapped, parseManaCost(cost), 0, p.manaPool);
+  }
+
+  payNow(playerId, cost) {
+    const p = this.getPlayer(playerId);
+    const untapped = p.battlefield.filter(x => isLand(x.card) && !x.tapped);
+    const payment = planManaPayment(untapped, parseManaCost(cost), 0, p.manaPool);
+    if (!payment) return false;
+    for (const land of payment.lands) land.tapped = true;
+    for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
+    return true;
+  }
+
+  getForetellCost(card) { return getForetellCost(card); }
+  getPlotCost(card) { return getPlotCost(card); }
+  getMadnessCost(card) { return getMadnessCost(card); }
 
   // ---------- Suspend ----------
   // "Rather than cast this card from your hand, you may pay [cost] and exile
@@ -3476,9 +3689,8 @@ export class Game {
     const payment = planManaPayment(untapped, parseManaCost(getTransmuteCost(card)), 0, p.manaPool);
     for (const land of payment.lands) land.tapped = true;
     for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
-    p.hand.splice(idx, 1);
-    p.graveyard.push(card);
     this.log(`${p.name} transmutes ${card.name}.`);
+    this.discardCard(p, card);
     const sameCmc = p.library.filter(c => (c.cmc || 0) === (card.cmc || 0));
     const pick = sameCmc.find(c => !isLand(c) && c.name !== card.name) || sameCmc[0];
     if (pick) {
@@ -4601,10 +4813,7 @@ export class Game {
     const p = this.getPlayer(ctx.target.id);
     if (!p) return;
     const count = Math.min(amount, p.hand.length);
-    for (let i = 0; i < count; i++) {
-      const idx = Math.floor(Math.random() * p.hand.length);
-      p.graveyard.push(p.hand.splice(idx, 1)[0]);
-    }
+    for (let i = 0; i < count; i++) this.discardCard(p, p.hand[Math.floor(Math.random() * p.hand.length)]);
     for (let i = 0; i < count; i++) this.drawCard(p);
     if (count > 0) this.log(`${p.name} discards ${count} card${count > 1 ? 's' : ''} and draws ${count} card${count > 1 ? 's' : ''}.`);
   }
@@ -4841,8 +5050,7 @@ export class Game {
     let maxDiscarded = 0;
     for (const pl of this.players) {
       maxDiscarded = Math.max(maxDiscarded, pl.hand.length);
-      pl.graveyard.push(...pl.hand);
-      pl.hand = [];
+      for (const c of [...pl.hand]) this.discardCard(pl, c);
     }
     for (const pl of this.players) {
       for (let i = 0; i < maxDiscarded; i++) this.drawCard(pl);
@@ -4927,16 +5135,56 @@ export class Game {
     const candidates = victim.hand.filter(matches);
     if (!candidates.length) { this.log(`${ctx.card.name} finds nothing to take.`); return; }
     const take = (c) => {
-      const i = victim.hand.indexOf(c);
-      if (i === -1) return;
-      victim.hand.splice(i, 1);
-      victim.graveyard.push(c);
+      if (!victim.hand.includes(c)) return;
       this.log(`${victim.name} discards ${c.name} (${ctx.card.name}).`);
+      this.discardCard(victim, c);
     };
     const sorted = candidates.slice().sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
     const seen = new Set();
     const options = sorted.filter(c => !seen.has(c.name) && seen.add(c.name)).map(c => ({ label: `Take ${c.name}`, resolve: () => take(c) }));
     this.requestChoice(ctx.controllerId, `${ctx.card.name}: choose a card for ${victim.name} to discard`, options, 0);
+  }
+
+  // Every discard goes through here, so discard-matters keywords see all of
+  // them: Mayhem (castable from the graveyard if discarded this turn) and
+  // Madness (discarded into exile instead, then cast for its madness cost
+  // or put into the graveyard). Callers log the discard themselves.
+  discardCard(p, card) {
+    const i = p.hand.indexOf(card);
+    if (i === -1) return;
+    p.hand.splice(i, 1);
+    (p.discardedThisTurn ||= []).push(card.instanceId);
+    const madness = getMadnessCost(card);
+    if (!madness) { p.graveyard.push(card); return; }
+    p.exile.push(card);
+    const toGraveyard = () => {
+      const j = p.exile.indexOf(card);
+      if (j !== -1) { p.exile.splice(j, 1); p.graveyard.push(card); }
+    };
+    const cast = () => {
+      const j = p.exile.indexOf(card);
+      if (j === -1) return;
+      p.exile.splice(j, 1);
+      if (this.castFromOutsideHand(p.id, card, { costOverride: madness, fromZone: 'exile' })) {
+        this.log(`${p.name} casts ${card.name} for its madness cost (${madness}).`);
+      } else {
+        this.log(`${card.name} can't be cast for madness right now.`);
+        p.graveyard.push(card);
+      }
+    };
+    const affordable = this.canAffordCost(p.id, card, madness);
+    this.requestChoice(p.id, `${card.name} was discarded — Madness ${madness}`, [
+      { label: `Cast it for ${madness}`, resolve: cast },
+      { label: 'Put it into your graveyard', resolve: toGraveyard },
+    ], affordable ? 0 : 1);
+  }
+
+  // Whether `cost` (a mana string standing in for the card's own cost) is
+  // payable right now, with the card's usual cost reductions.
+  canAffordCost(playerId, card, cost) {
+    const parsed = parseManaCost(cost || '');
+    parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId));
+    return !!this.planSpellPayment(playerId, card, parsed, 0);
   }
 
   // "Draw two cards, then discard a card" — the controller chooses what to
@@ -4945,11 +5193,9 @@ export class Game {
   applyLootDiscard(ctx, amount) {
     const p = this.getPlayer(ctx.controllerId);
     const discardOne = (c) => {
-      const i = p.hand.indexOf(c);
-      if (i === -1) return;
-      p.hand.splice(i, 1);
-      p.graveyard.push(c);
+      if (!p.hand.includes(c)) return;
       this.log(`${p.name} discards ${c.name}.`);
+      this.discardCard(p, c);
     };
     if (p.isAI) {
       for (const c of this.discardFodder(p).slice(0, amount)) discardOne(c);
@@ -4976,8 +5222,7 @@ export class Game {
     if (!p) return;
     let discarded = 0;
     for (let i = 0; i < amount && p.hand.length > 0; i++) {
-      const idx = Math.floor(Math.random() * p.hand.length);
-      p.graveyard.push(p.hand.splice(idx, 1)[0]);
+      this.discardCard(p, p.hand[Math.floor(Math.random() * p.hand.length)]);
       discarded++;
     }
     if (discarded > 0) this.log(`${p.name} discards ${discarded} card${discarded > 1 ? 's' : ''}.`);
@@ -5030,11 +5275,14 @@ export class Game {
     const p = this.getPlayer(playerId);
     const idx = p.exiledPlayable.findIndex(e => e.id === exileId);
     if (idx === -1) return { ok: false, reason: 'That card is no longer available to play.' };
-    const card = p.exiledPlayable[idx].card;
+    const entry = p.exiledPlayable[idx];
+    const card = entry.card;
+    if (!this.canPlayFromExile(playerId, exileId)) return { ok: false, reason: entry.notOnTurn === this.turnNumber ? "That can't be cast until a later turn." : 'Cannot play that right now.' };
     p.hand.push(card);
+    // Foretold cards cost their foretell cost; plotted ones are free.
     const result = isLand(card)
       ? (this.playLand(playerId, card.instanceId) ? { ok: true } : { ok: false, reason: 'Cannot play that land right now.' })
-      : this.castSpell(playerId, card.instanceId, targets, xValue, modeIndexes, kicked);
+      : this.castSpell(playerId, card.instanceId, targets, xValue, modeIndexes, kicked, { free: !!entry.free, costOverride: entry.costOverride || null, fromZone: 'exile' });
     if (result.ok) {
       p.exiledPlayable.splice(idx, 1);
     } else {
@@ -5053,7 +5301,14 @@ export class Game {
     const entry = p.exiledPlayable.find(e => e.id === exileId);
     if (!entry) return false;
     const card = entry.card;
-    return isLand(card) ? this.canPlayLand(playerId) : (this.canCastSpell(playerId, card) && this.affordability(playerId, card));
+    // Foretold/plotted/warped cards: only on a later turn; plotted ones
+    // only at sorcery speed.
+    if (entry.notOnTurn === this.turnNumber) return false;
+    if (entry.sorceryOnly && !(p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    if (isLand(card)) return this.canPlayLand(playerId);
+    if (!this.canCastSpell(playerId, card)) return false;
+    if (entry.free) return true;
+    return entry.costOverride ? this.canAffordCost(playerId, card, entry.costOverride) : this.affordability(playerId, card);
   }
 
   // ---------- casting from the graveyard (Flashback, Escape) ----------
@@ -5065,44 +5320,64 @@ export class Game {
   getFlashbackCost(card) { return getFlashbackCost(card); }
   getEscapeCost(card) { return getEscapeCost(card); }
 
-  canCastFromGraveyard(playerId, cardInstanceId, { viaEscape = false } = {}) {
-    if (this.pendingRequest) return false;
+  // Graveyard cast options for a card: see effects.js's getGraveyardCastCosts.
+  getGraveyardCastCosts(card) { return getGraveyardCastCosts(card); }
+
+  // Ways `card` in playerId's graveyard can be cast right now: the
+  // getGraveyardCastCosts entries whose extra requirements are met (enough
+  // other cards for Escape, a card/land to discard for Jump-start/Retrace,
+  // discarded this turn for Mayhem), at legal timing, and affordable.
+  getGraveyardCastWays(playerId, cardInstanceId) {
+    if (this.pendingRequest || this.priorityPlayer.id !== playerId) return [];
     const p = this.getPlayer(playerId);
-    if (this.priorityPlayer.id !== playerId) return false;
     const card = p.graveyard.find(c => c.instanceId === cardInstanceId);
-    if (!card) return false;
-    const altCost = viaEscape ? getEscapeCost(card) : getFlashbackCost(card);
-    if (!altCost) return false;
-    if (viaEscape) {
-      const others = p.graveyard.filter(c => c.instanceId !== cardInstanceId).length;
-      if (others < altCost.exileCount) return false;
-    }
+    if (!card) return [];
     const instantSpeed = isInstant(card) || /flash/.test((card.keywords || []).join(','));
-    if (!instantSpeed && !(p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
-    const parsed = parseManaCost(viaEscape ? altCost.manaCost : altCost);
+    if (!instantSpeed && !(p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return [];
     const untapped = p.battlefield.filter(perm => isLand(perm.card) && !perm.tapped);
-    return !!planManaPayment(untapped, parsed, 0, p.manaPool);
+    return getGraveyardCastCosts(card).filter(way => {
+      if (way.exileCount && p.graveyard.length - 1 < way.exileCount) return false;
+      if (way.discard === 'any' && p.hand.length === 0) return false;
+      if (way.discard === 'land' && !p.hand.some(isLand)) return false;
+      if (way.needsDiscardedThisTurn && !(p.discardedThisTurn || []).includes(card.instanceId)) return false;
+      return !!planManaPayment(untapped, parseManaCost(way.manaCost), 0, p.manaPool);
+    });
   }
 
-  // Casts/plays a card straight out of the graveyard via Flashback or
-  // Escape. Same "temporarily reunite with hand, reuse castSpell entirely"
-  // trick as playCardFromExile — except here the reunited card's manaCost
-  // is TEMPORARILY OVERRIDDEN to the alternative cost first (so
-  // castSpell's own mana-payment logic charges the right amount), then
-  // restored immediately after a successful cast (payment has already
-  // happened by then, so restoring it only fixes the card's own displayed/
-  // remembered cost going forward — e.g. if it becomes a permanent).
-  castFromGraveyard(playerId, cardInstanceId, { targets = [], xValue = 0, modeIndexes = null, viaEscape = false } = {}) {
-    if (!this.canCastFromGraveyard(playerId, cardInstanceId, { viaEscape })) return { ok: false, reason: 'Cannot cast that from the graveyard right now.' };
+  // via: 'flashback' | 'escape' | 'jumpstart' | 'retrace' | 'mayhem'
+  // (viaEscape: true is the older spelling of via: 'escape').
+  canCastFromGraveyard(playerId, cardInstanceId, { viaEscape = false, via = null } = {}) {
+    const kind = via || (viaEscape ? 'escape' : 'flashback');
+    return this.getGraveyardCastWays(playerId, cardInstanceId).some(w => w.via === kind);
+  }
+
+  // Casts a card straight out of the graveyard. Same "temporarily reunite
+  // with hand, reuse castSpell entirely" trick as playCardFromExile —
+  // except the reunited card's manaCost is TEMPORARILY OVERRIDDEN to the
+  // graveyard cost first (so castSpell charges the right amount), then
+  // restored right after a successful cast. Extra costs are paid after the
+  // cast succeeds: Escape exiles other graveyard cards; Jump-start and
+  // Retrace discard a card (`discardId`, or the least useful one). Flashback,
+  // Jump-start, and Escape (for a nonpermanent) exile the card as it
+  // resolves; Retrace and Mayhem don't.
+  castFromGraveyard(playerId, cardInstanceId, { targets = [], xValue = 0, modeIndexes = null, viaEscape = false, via = null, discardId = null } = {}) {
+    const kind = via || (viaEscape ? 'escape' : 'flashback');
+    const way = this.getGraveyardCastWays(playerId, cardInstanceId).find(w => w.via === kind);
+    if (!way) return { ok: false, reason: 'Cannot cast that from the graveyard right now.' };
     const p = this.getPlayer(playerId);
+    let discard = null;
+    if (way.discard) {
+      const pool = way.discard === 'land' ? p.hand.filter(isLand) : p.hand;
+      discard = pool.find(c => c.instanceId === discardId) || this.discardFodder(p).find(c => pool.includes(c));
+      if (!discard) return { ok: false, reason: `${kind === 'retrace' ? 'Retrace needs a land card' : 'Jump-start needs a card'} to discard.` };
+    }
     const idx = p.graveyard.findIndex(c => c.instanceId === cardInstanceId);
     const original = p.graveyard[idx];
-    const altCost = viaEscape ? getEscapeCost(original) : getFlashbackCost(original);
     const originalManaCost = original.manaCost;
-    const overridden = { ...original, manaCost: viaEscape ? altCost.manaCost : altCost };
+    const overridden = { ...original, manaCost: way.manaCost };
     p.graveyard.splice(idx, 1);
     p.hand.push(overridden);
-    const result = this.castSpell(playerId, overridden.instanceId, targets, xValue, modeIndexes);
+    const result = this.castSpell(playerId, overridden.instanceId, targets, xValue, modeIndexes, false, { fromZone: 'graveyard' });
     if (!result.ok) {
       const handIdx = p.hand.findIndex(c => c.instanceId === overridden.instanceId);
       if (handIdx !== -1) p.hand.splice(handIdx, 1);
@@ -5110,14 +5385,19 @@ export class Game {
       return result;
     }
     overridden.manaCost = originalManaCost;
-    if (viaEscape) {
-      for (let i = 0; i < altCost.exileCount && p.graveyard.length > 0; i++) p.exile.push(p.graveyard.shift());
-      this.log(`${p.name} exiles ${altCost.exileCount} other card${altCost.exileCount === 1 ? '' : 's'} from their graveyard to pay Escape.`);
+    if (kind === 'escape') {
+      for (let i = 0; i < way.exileCount && p.graveyard.length > 0; i++) p.exile.push(p.graveyard.shift());
+      this.log(`${p.name} exiles ${way.exileCount} other card${way.exileCount === 1 ? '' : 's'} from their graveyard to pay Escape.`);
     }
-    const stackItem = this.stack[this.stack.length - 1];
-    if (stackItem && stackItem.card === overridden) {
-      stackItem.viaFlashback = !viaEscape;
-      stackItem.viaEscape = viaEscape;
+    if (discard) {
+      this.log(`${p.name} discards ${discard.name} to ${kind === 'retrace' ? 'retrace' : 'jump-start'} ${original.name}.`);
+      this.discardCard(p, discard);
+    }
+    const stackItem = this.stack.find(item => item.card === overridden);
+    if (stackItem) {
+      stackItem.viaFlashback = kind === 'flashback' || kind === 'jumpstart';
+      stackItem.viaEscape = kind === 'escape';
+      stackItem.graveyardVia = kind;
     }
     return result;
   }
@@ -5909,6 +6189,7 @@ export class Game {
     this.getPlayer(perm.ownerId).graveyard.push(perm.card);
     this.leftBattlefieldThisTurn.push({ card: perm.card, ownerId: perm.ownerId });
     this.triggerDies(perm, previouslyAttachedIds);
+    if (wasCreature) this.triggerRecover(this.getPlayer(perm.ownerId), perm.card);
   }
 
   // Fires "whenever you sacrifice a permanent/creature/artifact" triggers
@@ -6815,9 +7096,9 @@ export class Game {
   doCleanup() {
     for (const p of this.players) {
       while (p.hand.length > 7) {
-        const discard = p.hand.pop();
-        p.graveyard.push(discard);
+        const discard = p.hand[p.hand.length - 1];
         this.log(`${p.name} discards ${discard.name} at the maximum hand size.`);
+        this.discardCard(p, discard);
       }
       for (const perm of p.battlefield) {
         perm.damage = 0;

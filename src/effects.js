@@ -858,6 +858,39 @@ function interpretEffectText(text) {
       continue;
     }
 
+    // "Discard your hand, then draw three cards" (Anje's Ravager).
+    if ((m = clause.match(/^discard your hand,? then draw (a|an|one|two|three|four|five|seven|\d+) cards?$/))) {
+      const amount = parseAmount(m[1]);
+      steps.push({
+        kind: 'discard',
+        targeting: 'none',
+        resolve: (game, ctx) => {
+          const p = game.getPlayer(ctx.controllerId);
+          if (p.hand.length) game.log(`${p.name} discards their hand (${p.hand.length} card${p.hand.length === 1 ? '' : 's'}).`);
+          for (const c of [...p.hand]) game.discardCard(p, c);
+          game.applyDrawEffect(ctx, amount);
+        },
+      });
+      continue;
+    }
+
+    // "Draw cards equal to its power" (Champion of Wits) and the "If you
+    // do, discard two cards" that follows it ("may" is always taken here,
+    // so "if you do" always holds).
+    if (/^draw cards equal to (?:its|this creature's) power$/.test(clause)) {
+      steps.push({
+        kind: 'draw',
+        targeting: 'none',
+        resolve: (game, ctx) => game.applyDrawEffect(ctx, ctx.sourcePerm ? game.effectivePower(ctx.sourcePerm) : (parseInt(ctx.card.power, 10) || 0)),
+      });
+      continue;
+    }
+    if ((m = clause.match(/^if you do,? discard (a|an|one|two|three|\d+) cards?$/))) {
+      const amount = parseAmount(m[1]);
+      steps.push({ kind: 'discard', amount, targeting: 'none', resolve: (game, ctx) => game.applyLootDiscard(ctx, amount) });
+      continue;
+    }
+
     // "Two target players each draw a card" (Huddle Up).
     if ((m = clause.match(/^(two|three) target players each draw (a|an|one|two|three|\d+) cards?$/))) {
       const count = parseAmount(m[1]), amount = parseAmount(m[2]);
@@ -2552,12 +2585,14 @@ function interpretEffectText(text) {
     // ("target instant or sorcery card" — Archaeomancer; "target creature
     // card", ...) ahead of the bare "card", defaulting to any nonland card
     // when no restriction is given.
-    if ((m = clause.match(/return target (?:([\w\s]+?) )?card from (?:your|a|target player's) graveyard to (?:your|its owner's|their owner's) hand/))) {
-      const typeWords = m[1] ? m[1].trim().toLowerCase().split(/\s+or\s+/) : null;
+    // Also "up to N target ... cards" (Life from the Loam's three lands).
+    if ((m = clause.match(/return (?:up to (two|three|four|\d+) )?target (?:([\w\s]+?) )?cards? from (?:your|a|target player's) graveyard to (?:your|its owner's|their owner's) hand/))) {
+      const count = m[1] ? parseAmount(m[1]) : 1;
+      const typeWords = m[2] ? m[2].trim().toLowerCase().split(/\s+or\s+/).map(w => w.replace(/s$/, '')) : null;
       steps.push({
         kind: 'regrowth',
         targeting: 'none',
-        resolve: (game, ctx) => game.applyRegrowthEffect(ctx, typeWords),
+        resolve: (game, ctx) => { for (let i = 0; i < count; i++) game.applyRegrowthEffect(ctx, typeWords); },
       });
       continue;
     }
@@ -3352,6 +3387,17 @@ export function interpretGraveyardAbilities(card) {
       if (manaCost) abilities.push({ manaCost, sorcerySpeedOnly: true, scavenge: true, targetKinds: ['creature'] });
       continue;
     }
+    // Embalm / Eternalize / Encore — exile this card from your graveyard
+    // (part of the cost) to make token copies: Embalm a white Zombie copy,
+    // Eternalize a 4/4 black Zombie copy, Encore one hasty copy per
+    // opponent that must attack it and is sacrificed at the next end step.
+    // All sorcery-speed.
+    const tokenAbility = line.match(/^(embalm|eternalize|encore) ((?:\{[^}]+\})+)$/i);
+    if (tokenAbility) {
+      const manaCost = (tokenAbility[2].match(/\{[^}]+\}/g) || []).filter(isPayableManaSymbol).join('');
+      if (manaCost) abilities.push({ manaCost, sorcerySpeedOnly: true, [tokenAbility[1].toLowerCase()]: true });
+      continue;
+    }
     const m = line.match(/^([^:]+):\s*return this card from your graveyard to the battlefield( tapped)?\.?$/i);
     if (!m) continue;
     const costText = m[1].trim();
@@ -3853,7 +3899,7 @@ export function getCyclingAbility(card) {
 export function getAlternativeCosts(card) {
   const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
   const result = [];
-  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning']) {
+  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp']) {
     const m = text.match(new RegExp(`^${kind} ((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[1] });
   }
@@ -3892,6 +3938,42 @@ export function getEntwineCost(card) {
   const m = text.match(/^entwine ((?:\{[^}]+\})+)/im);
   return m ? m[1] : null;
 }
+
+// Ways to cast a card from the graveyard (batch 5 adds to Flashback and
+// Escape): Jump-start (its mana cost plus discarding a card, then exiled),
+// Retrace (its mana cost plus discarding a land card; goes back to the
+// graveyard), and Mayhem ("Mayhem {1}{R}": only if it was discarded this
+// turn). Returns [{ via, manaCost, discard?, exileCount?, needsDiscardedThisTurn? }].
+export function getGraveyardCastCosts(card) {
+  const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
+  const out = [];
+  const flashback = getFlashbackCost(card);
+  if (flashback) out.push({ via: 'flashback', manaCost: flashback });
+  const escape = getEscapeCost(card);
+  if (escape) out.push({ via: 'escape', manaCost: escape.manaCost, exileCount: escape.exileCount });
+  if (/^jump-start\b/im.test(text) && card.manaCost) out.push({ via: 'jumpstart', manaCost: card.manaCost, discard: 'any' });
+  if (/^retrace\b/im.test(text) && card.manaCost) out.push({ via: 'retrace', manaCost: card.manaCost, discard: 'land' });
+  const mayhem = text.match(/^mayhem ((?:\{[^}]+\})+)/im);
+  if (mayhem) out.push({ via: 'mayhem', manaCost: mayhem[1], needsDiscardedThisTurn: true });
+  return out;
+}
+
+// Single-cost keywords read off a line of their own (reminder text
+// stripped): Madness, Foretell, Plot, Recover. Each returns the cost string
+// or null. Dredge returns N (0 if none). Rebound is a plain flag.
+function lineCost(card, keyword) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(new RegExp(`^${keyword} ((?:\\{[^}]+\\})+)`, 'im'));
+  return m ? m[1] : null;
+}
+export function getMadnessCost(card) { return lineCost(card, 'madness'); }
+export function getForetellCost(card) { return lineCost(card, 'foretell'); }
+export function getPlotCost(card) { return lineCost(card, 'plot'); }
+export function getRecoverCost(card) { return lineCost(card, 'recover'); }
+export function getDredgeAmount(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^dredge (\d+)/im);
+  return m ? parseInt(m[1], 10) : 0;
+}
+export function hasRebound(card) { return /^rebound\b/im.test((card.oracleText || '').replace(/\([^()]*\)/g, '')); }
 
 // Optional costs paid as a spell is cast (batch 4b). Each returns null when
 // the card doesn't have the keyword.
