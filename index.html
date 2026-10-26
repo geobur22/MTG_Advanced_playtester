@@ -17,8 +17,11 @@
 
       <div id="commander-fields" hidden>
         <label class="field-label" for="commander-input">Your commander</label>
-        <input type="text" id="commander-input" placeholder="e.g. Aurelia, the Warleader" />
+        <input type="text" id="commander-input" placeholder="e.g. Aurelia, the Warleader — partners: Name + Name" />
       </div>
+
+      <label class="field-label" for="companion-input">Your companion (optional)</label>
+      <input type="text" id="companion-input" placeholder="e.g. Lurrus of the Dream-Den" />
 
       <label class="field-label" for="deck-input">Your decklist</label>
       <div class="deck-library-row">
@@ -33,7 +36,7 @@
         <summary>Opponent's decklist (optional — defaults to a preset deck)</summary>
         <div id="opponent-commander-fields" hidden>
           <label class="field-label" for="opponent-commander-input">Opponent's commander</label>
-          <input type="text" id="opponent-commander-input" placeholder="e.g. Slimefoot, the Stowaway" />
+          <input type="text" id="opponent-commander-input" placeholder="e.g. Slimefoot, the Stowaway — partners: Name + Name" />
         </div>
         <div class="deck-library-row">
           <select class="saved-deck-select" id="theirs-deck-select" data-slot="theirs">

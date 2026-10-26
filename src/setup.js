@@ -148,12 +148,27 @@ async function runSetup({ watchMode }) {
       return;
     }
     oppText = oppText || DEFAULT_OPPONENT_DECK;
-    const [mine, theirs, commanderA, commanderB] = await Promise.all([
+    // Partners (and a commander + Background) are entered as "Name + Name".
+    const fetchCommanders = async (names) => {
+      const parts = names.split(/\s+\+\s+/).map(x => x.trim()).filter(Boolean).slice(0, 2);
+      const found = await Promise.all(parts.map(fetchOneCard));
+      return found.length > 1 ? found : found[0];
+    };
+    const companionName = el('companion-input')?.value.trim() || '';
+    const [mine, theirs, commanderA, commanderB, companionA] = await Promise.all([
       buildDeckFromText(text),
       buildDeckFromText(oppText),
-      commanderMode ? fetchOneCard(commanderNameA) : null,
-      commanderMode && commanderNameB ? fetchOneCard(commanderNameB) : null,
+      commanderMode ? fetchCommanders(commanderNameA) : null,
+      commanderMode && commanderNameB ? fetchCommanders(commanderNameB) : null,
+      companionName ? fetchOneCard(companionName) : null,
     ]);
+    if (Array.isArray(commanderA)) {
+      const partnerish = (c) => /\b(?:partner|friends forever|choose a background|doctor's companion)\b|\bbackground\b/i.test(`${c.oracleText} ${c.typeLine}`);
+      if (!commanderA.every(partnerish)) {
+        const proceed = await showConfirm(`${commanderA.map(c => c.name).join(' and ')} don't both have Partner (or a Background pairing). Use both as commanders anyway?`);
+        if (!proceed) { setButtonsBusy(false); return; }
+      }
+    }
 
     const recommendedSize = commanderMode ? 99 : 40;
     if (mine.deck.length < recommendedSize) {
@@ -165,25 +180,28 @@ async function runSetup({ watchMode }) {
       if (!proceed) { setButtonsBusy(false); return; }
     }
     if (commanderMode && commanderA) {
-      const { duplicates, colorViolations } = checkCommanderLegality(mine.deck, commanderA);
+      // Partners' color identity is the union of both.
+      const identityCard = Array.isArray(commanderA)
+        ? { name: commanderA.map(c => c.name).join(' + '), colorIdentity: [...new Set(commanderA.flatMap(c => c.colorIdentity || []))] }
+        : commanderA;
+      const { duplicates, colorViolations } = checkCommanderLegality(mine.deck, identityCard);
       if (duplicates.length) {
         const proceed = await showConfirm(`Your deck breaks the Commander singleton rule — these cards appear more than once:\n${duplicates.join(', ')}\n\nContinue anyway?`);
         if (!proceed) { setButtonsBusy(false); return; }
       }
       if (colorViolations.length) {
-        const proceed = await showConfirm(`These cards are outside ${commanderA.name}'s color identity:\n${colorViolations.join(', ')}\n\nContinue anyway?`);
+        const proceed = await showConfirm(`These cards are outside ${identityCard.name}'s color identity:\n${colorViolations.join(', ')}\n\nContinue anyway?`);
         if (!proceed) { setButtonsBusy(false); return; }
       }
     }
 
     const cardsToAnalyze = [...mine.deck, ...theirs.deck];
-    if (commanderA) cardsToAnalyze.push(commanderA);
-    if (commanderB) cardsToAnalyze.push(commanderB);
+    for (const c of [commanderA, commanderB, companionA].flat()) if (c) cardsToAnalyze.push(c);
     await analyzeDeck(cardsToAnalyze);
 
     sessionStorage.setItem(DECK_STORAGE_KEY, JSON.stringify({
       deckA: mine.deck, deckB: theirs.deck, watchMode,
-      commanderMode, commanderA: commanderA || null, commanderB: commanderB || null,
+      commanderMode, commanderA: commanderA || null, commanderB: commanderB || null, companionA: companionA || null,
     }));
     window.location.href = 'play.html';
   } catch (err) {

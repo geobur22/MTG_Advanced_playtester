@@ -483,14 +483,18 @@ export function takeAITurnAction(game) {
     // Commander format: get the commander down as soon as it's affordable
     // rather than waiting — a bot that never touches its own command zone
     // would never actually test the format.
-    if (game.canCastCommander(p.id) && game.affordabilityForCommander(p.id)) {
-      const commanderCard = p.commander;
+    // (Each partner commander separately.)
+    for (let ci = 0; ci < (p.commanders || []).length; ci++) {
+      if (!game.canCastCommander(p.id, ci) || !game.affordabilityForCommander(p.id, ci)) continue;
+      const commanderCard = p.commanders[ci].card;
       const targets = pickTargetsFor(game, commanderCard, p.id).filter(Boolean);
       if (game.getMinRequiredTargetCount(commanderCard) <= targets.length) {
-        const result = game.castCommander(p.id, targets);
+        const result = game.castCommander(p.id, targets, 0, ci);
         if (result.ok) return;
       }
     }
+    // Companion: put it into hand once there's spare mana and nothing better.
+    if (game.step === 'main2' && game.canFetchCompanion(p.id) && game.fetchCompanion(p.id).ok) return;
 
     // Suspend: always for a card that can't be cast any other way
     // (Ancestral Vision), otherwise when the normal cost isn't affordable

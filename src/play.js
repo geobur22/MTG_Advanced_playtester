@@ -105,13 +105,13 @@ undoButton.addEventListener('click', () => {
     return;
   }
   sessionStorage.removeItem(DECK_STORAGE_KEY);
-  const { deckA, deckB, watchMode: wm, watchSpeedMs, commanderMode: cm, commanderA, commanderB } = JSON.parse(raw);
+  const { deckA, deckB, watchMode: wm, watchSpeedMs, commanderMode: cm, commanderA, commanderB, companionA } = JSON.parse(raw);
   watchMode = !!wm;
   if (typeof watchSpeedMs === 'number' && !Number.isNaN(watchSpeedMs)) watchThinkDelayMs = watchSpeedMs;
   commanderMode = !!cm;
-  loadedDecks = { deckA, deckB, commanderA, commanderB };
+  loadedDecks = { deckA, deckB, commanderA, commanderB, companionA };
   await loadAICache();
-  startGame(deckA, deckB, commanderA, commanderB);
+  startGame(deckA, deckB, commanderA, commanderB, companionA);
 })();
 
 // ---------- card hover tooltip ----------
@@ -180,7 +180,7 @@ function hideTooltip() {
 
 // ---------- game lifecycle ----------
 
-function startGame(deckA, deckB, commanderA, commanderB) {
+function startGame(deckA, deckB, commanderA, commanderB, companionA = null) {
   ui = { targeting: null, attackSelection: new Set(), attackTargets: {}, blockMap: [], armedBlocker: null, mulliganBottomSelection: new Set(), abilityChoice: null, equipChoice: null, ninjutsuChoice: null, graveyardView: null, cardDetail: null };
   lastUndoSnapshot = null; // a snapshot from a previous game instance would be meaningless here
   lastScannedLogIndex = 0; // the new Game's own logLines starts over from empty
@@ -193,7 +193,7 @@ function startGame(deckA, deckB, commanderA, commanderB) {
     aiControlsA: watchMode,
     aiControlsB: true,
     aiThinkDelayMs: watchMode ? watchThinkDelayMs : 0,
-    commanderMode, commanderA, commanderB,
+    commanderMode, commanderA, commanderB, companionA,
   });
   game.onChange(render);
   el('gameover-overlay').hidden = true;
@@ -207,8 +207,8 @@ function startGame(deckA, deckB, commanderA, commanderB) {
 
 el('play-again-button').addEventListener('click', () => {
   // Same decks, fresh shuffle — restarts in place, no reload/re-fetch needed.
-  const { deckA, deckB, commanderA, commanderB } = loadedDecks;
-  startGame(deckA, deckB, commanderA, commanderB);
+  const { deckA, deckB, commanderA, commanderB, companionA } = loadedDecks;
+  startGame(deckA, deckB, commanderA, commanderB, companionA);
 });
 
 el('new-deck-button').addEventListener('click', () => {
@@ -648,39 +648,58 @@ function renderPlayerBar(container, player, isOpponent) {
 // and once the commander is out on the battlefield it just renders as a
 // normal permanent, so the zone itself shows nothing for it then.
 function renderCommandZone(container, player, isOpponent) {
-  if (!game.commanderMode || !player.commander) { container.hidden = true; return; }
+  const entries = game.commanderMode ? (player.commanders || []) : [];
+  // The companion (outside the game) shows here too, in any format.
+  const showCompanion = player.companion && !player.companionUsed;
+  if (!entries.length && !showCompanion) { container.hidden = true; return; }
   container.hidden = false;
   container.innerHTML = '';
 
   const label = document.createElement('span');
   label.className = 'command-zone-label';
-  label.textContent = 'Command zone';
+  label.textContent = entries.length ? 'Command zone' : 'Companion';
   container.appendChild(label);
 
-  if (!player.commanderZone) {
-    const note = document.createElement('span');
-    note.className = 'stat';
-    note.textContent = `${player.commander.name} is on the battlefield`;
-    container.appendChild(note);
-    return;
-  }
+  entries.forEach((entry, index) => {
+    if (!entry.inZone) {
+      const note = document.createElement('span');
+      note.className = 'stat';
+      note.textContent = `${entry.card.name} is out of the command zone`;
+      container.appendChild(note);
+      return;
+    }
+    const div = document.createElement('div');
+    div.className = 'card';
+    const tax = game.commanderTax(player, index);
+    const castable = !isOpponent && game.canCastCommander(HUMAN_ID, index) && game.affordabilityForCommander(HUMAN_ID, index) && !ui.targeting && !ui.abilityChoice && !watchMode;
+    if (!isOpponent && !castable) div.classList.add('uncastable');
+    div.appendChild(cardVisual(entry.card));
+    if (tax > 0) {
+      const badge = document.createElement('div');
+      badge.className = 'commander-tax-badge';
+      badge.textContent = `+{${tax}}`;
+      badge.title = `Commander tax: {${tax}} extra, from ${entry.castCount} previous cast(s) from the command zone`;
+      div.appendChild(badge);
+    }
+    attachHoverTooltip(div, entry.card);
+    if (!isOpponent) div.addEventListener('click', () => handleCommandZoneClick(index));
+    container.appendChild(div);
+  });
 
-  const div = document.createElement('div');
-  div.className = 'card';
-  const tax = game.commanderTax(player);
-  const castable = !isOpponent && game.canCastCommander(HUMAN_ID) && game.affordabilityForCommander(HUMAN_ID) && !ui.targeting && !ui.abilityChoice && !watchMode;
-  if (!isOpponent && !castable) div.classList.add('uncastable');
-  div.appendChild(cardVisual(player.commander));
-  if (tax > 0) {
+  if (showCompanion) {
+    const div = document.createElement('div');
+    div.className = 'card';
+    const usable = !isOpponent && game.canFetchCompanion(HUMAN_ID) && !ui.targeting && !ui.abilityChoice && !watchMode;
+    if (!isOpponent && !usable) div.classList.add('uncastable');
+    div.appendChild(cardVisual(player.companion));
     const badge = document.createElement('div');
     badge.className = 'commander-tax-badge';
-    badge.textContent = `+{${tax}}`;
-    badge.title = `Commander tax: {${tax}} extra, from ${player.commanderCastCount} previous cast(s) from the command zone`;
+    badge.textContent = 'Companion — {3} to hand';
     div.appendChild(badge);
+    attachHoverTooltip(div, player.companion);
+    if (!isOpponent) div.addEventListener('click', () => { const r = game.fetchCompanion(HUMAN_ID); if (!r.ok) showAlert(r.reason); });
+    container.appendChild(div);
   }
-  attachHoverTooltip(div, player.commander);
-  if (!isOpponent) div.addEventListener('click', handleCommandZoneClick);
-  container.appendChild(div);
 }
 
 // Renders a player's battlefield as two stacked rows — everything else on
@@ -1563,14 +1582,14 @@ async function chooseModes(card, modal) {
 // Casting the commander from the command zone — same shape as casting a
 // hand card (see handleHandCardClick above), just sourced from the zone via
 // game.castCommander instead of game.castSpell.
-async function handleCommandZoneClick() {
+async function handleCommandZoneClick(index = 0) {
   if (game.gameOver || watchMode) return;
   if (ui.abilityChoice || ui.targeting) return;
   if (game.pendingRequest) return;
-  if (!game.canCastCommander(HUMAN_ID) || !game.affordabilityForCommander(HUMAN_ID)) return;
+  if (!game.canCastCommander(HUMAN_ID, index) || !game.affordabilityForCommander(HUMAN_ID, index)) return;
 
   const human = game.getPlayer(HUMAN_ID);
-  const card = human.commander;
+  const card = human.commanders[index].card;
   const kinds = game.getRequiredTargetKinds(card);
   let xValue = 0;
   const parsed = parseManaCost(card.manaCost);
@@ -1581,11 +1600,11 @@ async function handleCommandZoneClick() {
   }
 
   if (kinds.length === 0) {
-    game.castCommander(HUMAN_ID, [], xValue);
+    game.castCommander(HUMAN_ID, [], xValue, index);
     return;
   }
 
-  ui.targeting = { source: 'commander', card, kinds, collected: [], xValue };
+  ui.targeting = { source: 'commander', card, kinds, collected: [], xValue, commanderIndex: index };
   render();
 }
 
@@ -1685,7 +1704,7 @@ function handleTargetPick(target) {
       else if (t.source === 'nonTapAbility') game.activateNonTapAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
       else if (t.source === 'loyaltyAbility') game.activateLoyaltyAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
       else if (t.source === 'graveyardAbility') game.activateGraveyardAbility(HUMAN_ID, t.cardInstanceId, t.collected);
-      else if (t.source === 'commander') game.castCommander(HUMAN_ID, t.collected, t.xValue || 0);
+      else if (t.source === 'commander') game.castCommander(HUMAN_ID, t.collected, t.xValue || 0, t.commanderIndex || 0);
       else if (t.fromExile) game.playCardFromExile(HUMAN_ID, t.fromExile, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null });
       else if (t.fromGraveyard) game.castFromGraveyard(HUMAN_ID, t.fromGraveyard.cardInstanceId, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null, viaEscape: t.fromGraveyard.viaEscape, via: t.fromGraveyard.via, discardId: t.fromGraveyard.discardId });
       else {

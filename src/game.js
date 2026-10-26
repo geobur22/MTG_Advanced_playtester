@@ -382,8 +382,17 @@ function makePlayer(id, name, deck, isAI, startingLife = 20) {
     // from an opponent's commander specifically (21+ from a single
     // commander is its own loss condition, separate from life total).
     commander: null,
+    // Commander format: one entry per commander (two with Partner / a
+    // Background): { card, inZone, castCount }. `commander` stays the first
+    // one's card for display code.
+    commanders: [],
     commanderZone: false,
     commanderCastCount: 0,
+    commanderDamageFrom: {},
+    // Companion: a card outside the game that can be put into hand for {3}
+    // once per game (sorcery speed).
+    companion: null,
+    companionUsed: false,
     commanderDamageTaken: 0,
     // Player-level counters (experience, energy, poison, ...) — a plain
     // object keyed by counter-type string, same shape as a permanent's
@@ -434,7 +443,7 @@ export class Game {
   // shared with regular constructed games.
   constructor({
     deckA, deckB, nameA = 'You', nameB = 'Opponent', aiControlsA = false, aiControlsB = true, aiThinkDelayMs = 0,
-    commanderMode = false, commanderA = null, commanderB = null,
+    commanderMode = false, commanderA = null, commanderB = null, companionA = null, companionB = null,
   }) {
     const startingLife = commanderMode ? 40 : 20;
     this.players = [
@@ -443,10 +452,13 @@ export class Game {
     ];
     this.commanderMode = commanderMode;
     if (commanderMode) {
-      this.players[0].commander = commanderA;
-      this.players[0].commanderZone = !!commanderA;
-      this.players[1].commander = commanderB;
-      this.players[1].commanderZone = !!commanderB;
+      // commanderA/B: a card, or an array of two for partners.
+      [commanderA, commanderB].forEach((cmd, i) => {
+        const list = (Array.isArray(cmd) ? cmd : [cmd]).filter(Boolean);
+        const pl = this.players[i];
+        pl.commanders = list.map(card => ({ card, inZone: true, castCount: 0 }));
+        this.syncCommanderFields(pl);
+      });
     }
     this.aiThinkDelayMs = aiThinkDelayMs;
     this.activePlayerIndex = 0;
@@ -461,6 +473,8 @@ export class Game {
     this._actionsSinceLastPass = 0;
     this.stepIndex = 0;
     this.turnNumber = 1;
+    if (companionA) this.players[0].companion = companionA;
+    if (companionB) this.players[1].companion = companionB;
     // "There is an additional combat phase" (Aurelia's own attack trigger,
     // Relentless Assault, Waves of Aggression) — a count of extra
     // combat-then-main blocks still owed, consumed one at a time by
@@ -1809,8 +1823,9 @@ export class Game {
     // "Other" Dragon spells never includes the commander's own cast — skip
     // the command-zone Eminence check when the card being cast IS that
     // commander (recasting itself from the zone doesn't discount itself).
-    if (this.commanderMode && controller.commanderZone && controller.commander && controller.commander !== card) {
-      const text = (controller.commander.oracleText || '').toLowerCase();
+    for (const entry of this.commanderMode ? controller.commanders || [] : []) {
+      if (!entry.inZone || entry.card === card) continue;
+      const text = (entry.card.oracleText || '').toLowerCase();
       if (/eminence/.test(text)) scan(text);
     }
     return total;
@@ -1957,12 +1972,13 @@ export class Game {
     return 0;
   }
 
-  affordabilityForCommander(playerId) {
+  affordabilityForCommander(playerId, index = 0) {
     const p = this.getPlayer(playerId);
-    if (!p.commander) return false;
-    const parsed = parseManaCost(p.commander.manaCost);
-    parsed.generic += this.commanderTax(p);
-    parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(p.commander, playerId));
+    const entry = p.commanders?.[index];
+    if (!entry) return false;
+    const parsed = parseManaCost(entry.card.manaCost);
+    parsed.generic += 2 * entry.castCount;
+    parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(entry.card, playerId));
     const untapped = p.battlefield.filter(perm => isLand(perm.card) && !perm.tapped);
     return !!planManaPayment(untapped, parsed, 0, p.manaPool);
   }
@@ -2469,8 +2485,10 @@ export class Game {
     // — almost always the same as the caster, but not for a card like
     // Etali, Primal Storm's own attack trigger casts someone else's.
     const owner = this.getPlayer(stackItem.ownerId || stackItem.controllerId);
-    if (this.commanderMode && owner.commander === stackItem.card) {
-      owner.commanderZone = true;
+    const wardEntry = this.commanderMode ? this.commanderEntryFor(owner, stackItem.card) : null;
+    if (wardEntry) {
+      wardEntry.inZone = true;
+      this.syncCommanderFields(owner);
       this.log(`${stackItem.card.name} returns to ${owner.name}'s command zone instead.`);
     } else {
       owner.graveyard.push(stackItem.card);
@@ -2479,23 +2497,39 @@ export class Game {
 
   // ---------- command zone (Commander format only) ----------
 
-  commanderTax(player) { return 2 * player.commanderCastCount; }
+  // Tax: {2} for each previous cast of THAT commander from the zone (each
+  // partner has its own).
+  commanderTax(player, index = 0) { return 2 * (player.commanders?.[index]?.castCount || 0); }
 
-  canCastCommander(playerId) {
+  // Legacy single-commander fields, kept in step with the first commander.
+  syncCommanderFields(pl) {
+    const first = pl.commanders?.[0];
+    pl.commander = first?.card || null;
+    pl.commanderZone = !!first?.inZone;
+    pl.commanderCastCount = first?.castCount || 0;
+  }
+
+  commanderEntryFor(player, card) {
+    return (player.commanders || []).find(e => e.card === card || e.card === card?._dfcOriginal || e.card === card?._baseCard) || null;
+  }
+
+  canCastCommander(playerId, index = 0) {
     const p = this.getPlayer(playerId);
-    if (!this.commanderMode || !p.commander || !p.commanderZone) return false;
-    return this.canCastSpell(playerId, p.commander);
+    const entry = p.commanders?.[index];
+    if (!this.commanderMode || !entry || !entry.inZone) return false;
+    return this.canCastSpell(playerId, entry.card);
   }
 
   // Mirrors castSpell, but the card comes from the command zone (not hand)
   // and its cost is its mana cost plus {2} for every previous cast from the
   // zone this game (the "commander tax", cumulative and permanent).
-  castCommander(playerId, targets = [], xValue = 0) {
+  castCommander(playerId, targets = [], xValue = 0, index = 0) {
     const p = this.getPlayer(playerId);
-    if (!this.canCastCommander(playerId)) return { ok: false, reason: 'Cannot cast your commander right now.' };
-    const card = p.commander;
+    if (!this.canCastCommander(playerId, index)) return { ok: false, reason: 'Cannot cast your commander right now.' };
+    const entry = p.commanders[index];
+    const card = entry.card;
 
-    const taxPaid = this.commanderTax(p);
+    const taxPaid = this.commanderTax(p, index);
     const parsed = parseManaCost(card.manaCost);
     parsed.generic += taxPaid;
     parsed.generic = Math.max(0, parsed.generic - this.getCastCostReduction(card, playerId));
@@ -2505,8 +2539,9 @@ export class Game {
 
     for (const land of payment.lands) land.tapped = true;
     for (const color of Object.keys(payment.poolUsed)) p.manaPool[color] -= payment.poolUsed[color];
-    p.commanderZone = false;
-    p.commanderCastCount += 1;
+    entry.inZone = false;
+    entry.castCount += 1;
+    this.syncCommanderFields(p);
 
     const stackItem = {
       id: uid('stk'),
@@ -2549,11 +2584,12 @@ export class Game {
     // the loop above never sees it. Only eminence-tagged triggers count
     // here; a commander's OTHER triggered abilities still require actually
     // being on the battlefield, same as any other permanent.
-    if (this.commanderMode && caster.commanderZone && caster.commander) {
-      const triggers = interpretCastTriggers(caster.commander).filter(t => t.eminence);
+    for (const entry of this.commanderMode ? caster.commanders || [] : []) {
+      if (!entry.inZone) continue;
+      const triggers = interpretCastTriggers(entry.card).filter(t => t.eminence);
       for (const trig of triggers) {
         if (!spellMatchesFilter(castCard, trig.filter)) continue;
-        this.resolveEffectSteps(trig.steps, [], { controllerId: caster.id, card: caster.commander, sourcePerm: null });
+        this.resolveEffectSteps(trig.steps, [], { controllerId: caster.id, card: entry.card, sourcePerm: null });
       }
     }
   }
@@ -3881,6 +3917,27 @@ export class Game {
     }
     if (picks.length) this.log(`${ctx.card.name} returns ${picks.map(c => c.name).join(', ')} to ${toHand ? 'hand' : 'the battlefield'}.`);
     this.checkStateBasedActions();
+  }
+
+  // ---------- Batch 13: Partner, Companion ----------
+  // Companion: once per game, pay {3} at sorcery speed to put your companion
+  // (from outside the game) into your hand.
+  canFetchCompanion(playerId) {
+    const p = this.getPlayer(playerId);
+    if (!p.companion || p.companionUsed || this.gameOver || this.pendingRequest) return false;
+    if (!(this.active.id === playerId && this.priorityPlayer.id === playerId && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    return this.payableNow(playerId, '{3}');
+  }
+
+  fetchCompanion(playerId) {
+    if (!this.canFetchCompanion(playerId)) return { ok: false, reason: "Can't put your companion into your hand right now." };
+    const p = this.getPlayer(playerId);
+    this.payNow(playerId, '{3}');
+    p.companionUsed = true;
+    p.hand.push({ ...p.companion, instanceId: p.companion.instanceId || uid('companion') });
+    this.log(`${p.name} pays {3} to put their companion, ${p.companion.name}, into their hand.`);
+    this.afterAction(playerId);
+    return { ok: true };
   }
 
   // ---------- Batch 12: double-faced, split, and adventure cards ----------
@@ -5821,8 +5878,9 @@ export class Game {
     // this is the one other zone a commander can leave FROM (the stack).
     if (countered.isCopy) {
       this.log(`${ctx.card.name} counters the copy of ${countered.card.name}.`);
-    } else if (this.commanderMode && owner.commander === countered.card) {
-      owner.commanderZone = true;
+    } else if (this.commanderMode && this.commanderEntryFor(owner, countered.card)) {
+      this.commanderEntryFor(owner, countered.card).inZone = true;
+      this.syncCommanderFields(owner);
       this.log(`${ctx.card.name} counters ${countered.card.name}; it returns to ${owner.name}'s command zone instead.`);
     } else {
       owner.graveyard.push(countered.card);
@@ -7967,8 +8025,10 @@ export class Game {
   // how most games actually play it out.
   redirectCommanderToZone(perm) {
     const owner = this.getPlayer(perm.ownerId);
-    if (!this.commanderMode || owner.commander !== perm.card) return false;
-    owner.commanderZone = true;
+    const entry = this.commanderMode ? this.commanderEntryFor(owner, perm.card) : null;
+    if (!entry) return false;
+    entry.inZone = true;
+    this.syncCommanderFields(owner);
     this.log(`${perm.card.name} returns to ${owner.name}'s command zone instead.`);
     return true;
   }
@@ -8677,7 +8737,13 @@ export class Game {
         if (!attackerOwner.combatDamagerTypesThisTurn.includes(st)) attackerOwner.combatDamagerTypesThisTurn.push(st);
       }
     }
-    if (isCommanderSource) defenderPlayer.commanderDamageTaken += amount;
+    if (isCommanderSource) {
+      // 21 combat damage from any ONE commander loses the game (partners
+      // are counted separately).
+      const key = (attackerPerm._dfcCard || attackerPerm._baseCard || attackerPerm.card).name;
+      defenderPlayer.commanderDamageFrom[key] = (defenderPlayer.commanderDamageFrom[key] || 0) + amount;
+      defenderPlayer.commanderDamageTaken = Math.max(...Object.values(defenderPlayer.commanderDamageFrom));
+    }
     // Combat damage to the monarch makes the attacker's controller the monarch.
     if (amount > 0 && this.monarch === defenderPlayer.id) this.becomeMonarch(attackerPerm.controllerId);
     // Toxic N: combat damage to a player also gives N poison counters.
@@ -8700,7 +8766,7 @@ export class Game {
       // Commander format's second loss condition: 21+ combat damage from a
       // single commander, tracked separately from life total (see
       // checkStateBasedActions).
-      const isCommanderSource = this.commanderMode && this.getPlayer(attackerPerm.controllerId).commander === attackerPerm.card;
+      const isCommanderSource = this.commanderMode && !!this.commanderEntryFor(this.getPlayer(attackerPerm.ownerId), attackerPerm._dfcCard || attackerPerm._baseCard || attackerPerm.card);
 
       if (blockers.length === 0) {
         if (kws.has('lifelink')) this.getPlayer(attackerPerm.controllerId).life += power;
