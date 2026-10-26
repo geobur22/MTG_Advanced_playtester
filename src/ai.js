@@ -668,6 +668,30 @@ export function takeAITurnAction(game) {
       }
     }
 
+    // Channel (and other "discard this card:" abilities) in main 2, for a
+    // card we can't cast anyway; Renew from the graveyard.
+    if (game.step === 'main2') {
+      const landsNow = p.battlefield.filter(x => isLand(game, x.card)).length;
+      for (const card of p.hand) {
+        const abs = game.getHandAbilities(card);
+        for (let i = 0; i < abs.length; i++) {
+          if (abs[i].attackingTarget || !game.canActivateHandAbility(p.id, card.instanceId, i)) continue;
+          if (game.affordability(p.id, card) && (card.cmc || 0) <= landsNow) continue;
+          const kinds = game.expandTargetKinds(abs[i].steps);
+          const targets = pickTargetsForKinds(game, card, p.id, kinds).filter(Boolean);
+          if (game.minRequiredTargetCount(abs[i].steps) > targets.length) continue;
+          if (game.activateHandAbility(p.id, card.instanceId, i, targets).ok) return;
+        }
+      }
+      for (const card of [...p.graveyard]) {
+        const r = game.getRenew(card);
+        if (!r || !game.canRenew(p.id, card.instanceId)) continue;
+        const targets = pickTargetsForKinds(game, card, p.id, game.expandTargetKinds(r.steps)).filter(Boolean);
+        if (game.minRequiredTargetCount(r.steps) > targets.length) continue;
+        if (game.renew(p.id, card.instanceId, targets).ok) return;
+      }
+    }
+
     // Level up Leveler creatures with spare mana in main 2.
     if (game.step === 'main2') {
       for (const perm of p.battlefield) if (game.getLevelUp(perm._baseCard || perm.card) && game.canLevelUp(p.id, perm.id) && game.levelUp(p.id, perm.id).ok) return;
@@ -854,6 +878,15 @@ export function takeAITurnAction(game) {
   // preserve as much of this combat's own damage as possible.
   if (p.id === game.active.id && game.step === 'declareBlockers' && game.stack.length === 0) {
     const unblockedAttackers = p.battlefield.filter(perm => perm.attacking && perm.blockedBy.length === 0);
+    // Bloodrush: pump an unblocked attacker (biggest first) with a hand card.
+    if (unblockedAttackers.length) {
+      const target = unblockedAttackers.slice().sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0];
+      for (const card of p.hand) {
+        const abs = game.getHandAbilities(card);
+        const i = abs.findIndex(ab => ab.attackingTarget);
+        if (i >= 0 && game.canActivateHandAbility(p.id, card.instanceId, i) && game.activateHandAbility(p.id, card.instanceId, i, [{ type: 'permanent', id: target.id }]).ok) return;
+      }
+    }
     // Sneak: swap the weakest unblocked attacker for a sneak card — a
     // creature that hits harder, or a spell worth casting cheaply.
     for (const card of p.hand) {

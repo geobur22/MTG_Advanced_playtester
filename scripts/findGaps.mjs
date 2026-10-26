@@ -29,6 +29,8 @@ const ERROR_LOG_PATTERNS = [
   /finds no basic land/i,
   /hit the action safety cap/i,
   /cascade got \d+ deep/i,
+  /Infinite loop/i,
+  /game is a draw/i,
 ];
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }

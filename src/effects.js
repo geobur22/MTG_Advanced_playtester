@@ -40,11 +40,205 @@ function isPayableManaSymbol(sym) {
   return inner === 'X' || inner === 'C' || /^\d+$/.test(inner) || ['W', 'U', 'B', 'R', 'G'].includes(inner) || inner.includes('/');
 }
 
+
+// ---------- Conditions and counts (ability words) ----------
+// Ability words (Threshold, Morbid, Raid, Metalcraft, Delirium, ...) have
+// no rules meaning of their own — they label a CONDITION ("if you attacked
+// this turn", "as long as seven or more cards are in your graveyard") or a
+// COUNT ("where X is the number of basic land types among lands you
+// control"). parseCondition / parseCount turn that text into a test /
+// number function of (game, ctx), shared by effect clauses, triggers, and
+// static "as long as" bonuses (game.js). Both return null for text they
+// don't understand, so callers can fall back to their old behavior.
+const NUM_WORDS = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, twenty: 20 };
+const num = (t) => (NUM_WORDS[t] ?? parseInt(t, 10));
+const CARD_TYPE_WORDS = ['artifact', 'battle', 'creature', 'enchantment', 'instant', 'kindred', 'land', 'planeswalker', 'sorcery'];
+const ctrl = (game, ctx) => game.getPlayer(ctx.controllerId);
+const isPermanentCard = (c) => /artifact|battle|creature|enchantment|land|planeswalker/i.test(c.typeLine || '');
+// "creatures", "artifacts", "creature cards", "Elves" → a card/permanent test.
+function typeTest(game, words) {
+  let w = words.trim().replace(/\bcards?$/, '').trim().replace(/s$/, '').replace(/ie$/, 'y');
+  if (w === 'elve') w = 'elf';
+  if (w === 'permanent') return (c) => isPermanentCard(c);
+  if (w === 'nonland permanent') return (c) => isPermanentCard(c) && !/\bland\b/i.test(c.typeLine || '');
+  const neg = w.startsWith('non');
+  const base = neg ? w.replace(/^non-?/, '') : w;
+  const multi = base.split(/\s+and\/or\s+|\s+or\s+/);
+  const test = (c) => multi.some(t => game.hasTypeWord(c, t));
+  return neg ? (c) => !test(c) : test;
+}
+const condCache = new Map();
+export function parseCondition(text) {
+  const key = text.trim().toLowerCase().replace(/[.,]$/, '');
+  if (condCache.has(key)) return condCache.get(key);
+  const result = buildCondition(key);
+  condCache.set(key, result);
+  return result;
+}
+function buildCondition(t) {
+  let m;
+  // "X and Y" / "X or Y" of two understood conditions.
+  if ((m = t.match(/^(.+?) (and|or) (.+)$/)) && !/\band\/or\b/.test(t)) {
+    const a = parseCondition(m[1]), b = parseCondition(m[3]);
+    if (a && b) return m[2] === 'and' ? (g, c) => a(g, c) && b(g, c) : (g, c) => a(g, c) || b(g, c);
+  }
+  // Threshold: "seven or more cards are in your graveyard"
+  if ((m = t.match(/^(?:there are )?(\w+) or more cards (?:are )?in your graveyard$/))) { const n = num(m[1]); return (g, c) => ctrl(g, c).graveyard.length >= n; }
+  // Spell mastery / undergrowth-style: "there are two or more instant and/or sorcery cards in your graveyard"
+  if ((m = t.match(/^there are (\w+) or more ([\w\s/,-]+?) cards in your graveyard$/))) { const n = num(m[1]); const words = m[2]; return (g, c) => { const test = typeTest(g, words); return ctrl(g, c).graveyard.filter(test).length >= n; }; }
+  // Delirium: "there are four or more card types among cards in your graveyard"
+  if ((m = t.match(/^there are (\w+) or more card types among cards in your graveyard$/))) { const n = num(m[1]); return (g, c) => new Set(ctrl(g, c).graveyard.flatMap(card => CARD_TYPE_WORDS.filter(w => new RegExp(`\\b${w}\\b`, 'i').test(card.typeLine || '')))).size >= n; }
+  // Descend: "there are eight or more permanent cards in your graveyard"
+  if ((m = t.match(/^there are (\w+) or more permanent cards in your graveyard$/))) { const n = num(m[1]); return (g, c) => ctrl(g, c).graveyard.filter(isPermanentCard).length >= n; }
+  if (/^you descended this turn$/.test(t)) return (g, c) => !!ctrl(g, c).descendedThisTurn;
+  // Hellbent / hand size
+  if (/^you have no cards in hand$/.test(t)) return (g, c) => ctrl(g, c).hand.length === 0;
+  if ((m = t.match(/^you have (\w+) or more cards in hand$/))) { const n = num(m[1]); return (g, c) => ctrl(g, c).hand.length >= n; }
+  // Fateful hour / life totals
+  if ((m = t.match(/^you have (\w+) or less life$/))) { const n = num(m[1]); return (g, c) => ctrl(g, c).life <= n; }
+  if ((m = t.match(/^you have (\w+) or more life$/))) { const n = num(m[1]); return (g, c) => ctrl(g, c).life >= n; }
+  if ((m = t.match(/^you have at least (\w+) life more than your starting life total$/))) { const n = num(m[1]); return (g, c) => ctrl(g, c).life >= (g.commanderMode ? 40 : 20) + n; }
+  // Raid / attacks
+  if (/^you attacked (?:with a creature )?this turn$/.test(t)) return (g, c) => !!ctrl(g, c).attackedThisTurnFlag;
+  if ((m = t.match(/^you attacked with creatures with total power (\w+) or greater this combat$/))) { const n = num(m[1]); return (g, c) => ctrl(g, c).battlefield.filter(x => x.attacking).reduce((s, x) => s + g.effectivePower(x), 0) >= n; }
+  // Morbid
+  if (/^a creature died this turn$/.test(t)) return (g) => g.leftBattlefieldThisTurn.some(e => g.isCreature(e.card));
+  // Revolt / disappear / void
+  if (/^a permanent (?:you controlled )?left the battlefield (?:under your control )?this turn$/.test(t)) return (g, c) => (g.permanentsLeftThisTurn || []).some(e => e.controllerId === c.controllerId);
+  if (/^a nonland permanent left the battlefield this turn or a spell was warped this turn$/.test(t)) return (g) => (g.permanentsLeftThisTurn || []).some(e => !e.isLand) || !!g.spellWarpedThisTurn;
+  // Infusion
+  if (/^you gained life this turn$/.test(t)) return (g, c) => (ctrl(g, c).lifeGainedThisTurn || 0) > 0;
+  if (/^an opponent lost life this turn$/.test(t)) return (g, c) => { const o = g.opponentOf(c.controllerId); return o.life < (o.lifeAtTurnStart ?? o.life) || o.damageTakenThisTurn > 0; };
+  // Celebration
+  if ((m = t.match(/^(\w+) or more nonland permanents entered the battlefield under your control this turn$/))) { const n = num(m[1]); return (g, c) => (ctrl(g, c).nonlandEnteredThisTurn || 0) >= n; }
+  // Corrupted
+  if ((m = t.match(/^an opponent has (\w+) or more poison counters$/))) { const n = num(m[1]); return (g, c) => (g.opponentOf(c.controllerId).counters.poison || 0) >= n; }
+  // Coven
+  if (/^you control three or more creatures with different powers$/.test(t)) return (g, c) => new Set(ctrl(g, c).battlefield.filter(x => g.isCreature(x.card)).map(x => g.effectivePower(x))).size >= 3;
+  // Formidable
+  if ((m = t.match(/^creatures you control have total power (\w+) or greater$/))) { const n = num(m[1]); return (g, c) => ctrl(g, c).battlefield.filter(x => g.isCreature(x.card)).reduce((s, x) => s + g.effectivePower(x), 0) >= n; }
+  // Ferocious: "you control a creature with power 4 or greater"
+  if ((m = t.match(/^you control an? ([\w\s-]+?) with (power|toughness|mana value) (\w+) or (greater|less)$/))) {
+    const words = m[1], stat = m[2], n = num(m[3]), greater = m[4] === 'greater';
+    return (g, c) => { const test = typeTest(g, words); return ctrl(g, c).battlefield.some(x => { if (!test(x.card)) return false; const v = stat === 'power' ? g.effectivePower(x) : stat === 'toughness' ? g.effectiveToughness(x) : (x.card.cmc || 0); return greater ? v >= n : v <= n; }); };
+  }
+  // Metalcraft / generic counts: "you control three or more artifacts"
+  if ((m = t.match(/^you control (\w+) or more ([\w\s/-]+?)$/))) { const n = num(m[1]); const words = m[2]; if (!Number.isNaN(n)) return (g, c) => { const test = typeTest(g, words); return ctrl(g, c).battlefield.filter(x => test(x.card)).length >= n; }; }
+  if ((m = t.match(/^you control an? ([\w\s-]+?)$/)) && !/\bcommander\b/.test(m[1])) { const words = m[1]; return (g, c) => { const test = typeTest(g, words); return ctrl(g, c).battlefield.some(x => test(x.card) && x.id !== c.sourcePerm?.id); }; }
+  if ((m = t.match(/^you control no ([\w\s-]+?)$/))) { const words = m[1]; return (g, c) => { const test = typeTest(g, words); return !ctrl(g, c).battlefield.some(x => test(x.card)); }; }
+  // Lieutenant
+  if (/^you control your commander$/.test(t)) return (g, c) => (ctrl(g, c).commanders || []).some(e => ctrl(g, c).battlefield.some(x => (x._dfcCard || x._baseCard || x.card) === e.card));
+  // Turns, tapped/attacking
+  if (/^it'?s your turn$/.test(t)) return (g, c) => g.active.id === c.controllerId;
+  if (/^it'?s not your turn$/.test(t)) return (g, c) => g.active.id !== c.controllerId;
+  if (/^(?:this creature|it) is tapped$/.test(t)) return (g, c) => !!c.sourcePerm?.tapped;
+  if (/^(?:this creature|it) is untapped$/.test(t)) return (g, c) => !!c.sourcePerm && !c.sourcePerm.tapped;
+  if (/^(?:this creature|it) is attacking$/.test(t)) return (g, c) => !!c.sourcePerm?.attacking;
+  // Spells cast this turn (flurry-like conditions)
+  if ((m = t.match(/^you'?ve cast (\w+) or more spells this turn$/))) { const n = num(m[1]); return (g, c) => (ctrl(g, c).spellsCastThisTurn || 0) >= n; }
+  // Cast-time conditions (Adamant, Addendum)
+  if ((m = t.match(/^at least (\w+) (white|blue|black|red|green|colorless) mana was spent to cast (?:this spell|it)$/))) {
+    const n = num(m[1]); const L = { white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G', colorless: 'C' }[m[2]];
+    return (g, c) => ((c.castInfo?.colors || c.sourcePerm?.castInfo?.colors || {})[L] || 0) >= n;
+  }
+  // Eminence: "this creature is in the command zone or on the battlefield"
+  // — true wherever the ability is being checked from.
+  if (/^this creature is in the command zone or on the battlefield$/.test(t)) return () => true;
+  if (/^at least three mana of the same color was spent to cast (?:this spell|it)$/.test(t)) return (g, c) => Math.max(0, ...Object.values(c.castInfo?.colors || c.sourcePerm?.castInfo?.colors || {})) >= 3;
+  if (/^you cast (?:this spell|it) during your main phase$/.test(t)) return (g, c) => !!(c.castInfo?.mainPhase ?? c.sourcePerm?.castInfo?.mainPhase);
+  // Opponent comparisons
+  if (/^an opponent controls more lands than you$/.test(t)) return (g, c) => g.opponentOf(c.controllerId).battlefield.filter(x => g.isLand(x.card)).length > ctrl(g, c).battlefield.filter(x => g.isLand(x.card)).length;
+  if (/^an opponent controls more creatures than you$/.test(t)) return (g, c) => g.opponentOf(c.controllerId).battlefield.filter(x => g.isCreature(x.card)).length > ctrl(g, c).battlefield.filter(x => g.isCreature(x.card)).length;
+  return null;
+}
+
+// "the number of basic land types among lands you control" (Domain) and
+// friends — a function (game, ctx) → number, or null.
+export function parseCount(text) {
+  const t = text.trim().toLowerCase().replace(/[.,]$/, '');
+  let m;
+  if (/^the number of basic land types among lands you control$/.test(t)) return (g, c) => ['plains', 'island', 'swamp', 'mountain', 'forest'].filter(b => ctrl(g, c).battlefield.some(x => g.isLand(x.card) && new RegExp(`\\b${b}\\b`, 'i').test(x.card.typeLine || ''))).length;
+  if (/^the number of colors of mana spent to cast (?:this spell|it)$/.test(t)) return (g, c) => Object.keys(c.castInfo?.colors || c.sourcePerm?.castInfo?.colors || {}).filter(k => k !== 'C').length;
+  if (/^the number of colors among permanents you control$/.test(t)) return (g, c) => new Set(ctrl(g, c).battlefield.flatMap(x => x.card.colors || [])).size;
+  if ((m = t.match(/^the number of ([\w\s/,-]+?) cards? in your graveyard$/))) { const words = m[1]; return (g, c) => ctrl(g, c).graveyard.filter(typeTest(g, words)).length; }
+  if (/^the number of cards in your graveyard$/.test(t)) return (g, c) => ctrl(g, c).graveyard.length;
+  if (/^the number of cards in your hand$/.test(t)) return (g, c) => ctrl(g, c).hand.length;
+  if ((m = t.match(/^the number of ([\w\s/-]+?) you control$/)) && !/mana symbols|land types/.test(m[1])) { const words = m[1]; return (g, c) => ctrl(g, c).battlefield.filter(x => typeTest(g, words)(x.card)).length; }
+  if ((m = t.match(/^the number of (white|blue|black|red|green) mana symbols in the mana costs of permanents you control$/))) {
+    const L = { white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G' }[m[1]];
+    return (g, c) => ctrl(g, c).battlefield.reduce((s, x) => s + ((x.card.manaCost || '').match(new RegExp(`\\{(?:[^}]*\\/)?${L}(?:\\/[^}]*)?\\}`, 'g')) || []).length, 0);
+  }
+  if ((m = t.match(/^your devotion to (white|blue|black|red|green)$/))) { const L = { white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G' }[m[1]]; return (g, c) => g.devotion(c.controllerId, [L]); }
+  if (/^the greatest power among creatures you control$/.test(t)) return (g, c) => Math.max(0, ...ctrl(g, c).battlefield.filter(x => g.isCreature(x.card)).map(x => g.effectivePower(x)));
+  if (/^(?:this creature'?s|its) power$/.test(t)) return (g, c) => (c.sourcePerm ? g.effectivePower(c.sourcePerm) : 0);
+  if (/^your life total$/.test(t)) return (g, c) => ctrl(g, c).life;
+  return null;
+}
+
+// "for each color of mana spent to cast it" / "for each creature you
+// control" → the matching count.
+export function parseForEach(phrase) {
+  const t = phrase.trim().toLowerCase().replace(/[.,]$/, '');
+  if (/^colou?r of mana spent to cast (?:it|this spell|this creature)$/.test(t)) return parseCount('the number of colors of mana spent to cast it');
+  if (/^basic land type among lands you control$/.test(t)) return parseCount('the number of basic land types among lands you control');
+  return parseCount(`the number of ${t.replace(/\b(creature|artifact|enchantment|land|card|permanent|elf|goblin|zombie|token)\b/, '$1s').replace(/ss\b/, 's')}`);
+}
+
+// Wraps steps so they only resolve when `test` holds.
+function conditional(steps, test) {
+  return steps.map(step => ({ ...step, resolve: (game, ctx) => { if (test(game, ctx)) step.resolve(game, ctx); } }));
+}
+
+// The official ability words (CR 207.2c). They're labels with no rules
+// meaning, so "Morbid — " etc. is dropped before interpreting what follows.
+const ABILITY_WORDS = ['adamant', 'addendum', 'alliance', 'battalion', 'bloodrush', 'celebration', 'channel', 'chroma', 'cohort', 'constellation', 'converge', "council's dilemma", 'coven', 'delirium', 'descend 4', 'descend 8', 'disappear', 'domain', 'eerie', 'eminence', 'enrage', 'fateful hour', 'fathomless descent', 'ferocious', 'flurry', 'formidable', 'grandeur', 'hellbent', 'heroic', 'imprint', 'infusion', 'inspired', 'join forces', 'kinship', 'landfall', 'lieutenant', 'magecraft', 'metalcraft', 'morbid', 'opus', 'pack tactics', 'paradox', 'parley', 'radiance', 'raid', 'rally', 'renew', 'repartee', 'revolt', 'secret council', 'spell mastery', 'strive', 'survival', 'sweep', 'tempting offer', 'threshold', 'undergrowth', 'valiant', 'vivid', 'void', 'will of the council', 'corrupted', 'descend', 'max speed'];
+const ABILITY_WORD_PREFIX = new RegExp(`^(?:${ABILITY_WORDS.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\s*—\\s*`, 'gim');
+export function stripAbilityWords(text) { return (text || '').replace(ABILITY_WORD_PREFIX, '').replace(/ and whenever you fully unlock a room/gi, ''); }
+
+// "Y. If COND, Z instead." / "Y. Z instead if COND." (Tragic Slip, Fatal
+// Push, ...) — whichever applies at resolution. Returns the combined steps
+// and the text with both sentences removed, or null. Z's "that creature"
+// is the target Y chose, so both use the same target slots.
+function extractInsteadPair(text) {
+  const lines = text.split('\n');
+  for (let li = 0; li < lines.length; li++) {
+    const sentences = lines[li].match(/[^.]+\.?/g) || [];
+    for (let i = 0; i < sentences.length; i++) {
+      const s = sentences[i].trim().replace(/\.$/, '');
+      const m = s.match(/^if (.+?), (.+?),? instead$/) || s.match(/^(.+?) instead if (.+)$/);
+      if (!m) continue;
+      const [condText, alt] = s.startsWith('if ') ? [m[1], m[2]] : [m[2], m[1]];
+      const test = parseCondition(condText);
+      if (!test) continue;
+      const prevIdx = i - 1;
+      const prev = prevIdx >= 0 ? sentences[prevIdx].trim().replace(/\.$/, '') : (li > 0 ? lines[li - 1].trim().replace(/\.$/, '') : null);
+      if (!prev) continue;
+      const targetPhrase = (prev.match(/\btarget [a-z ]+?(?=[.,]|$| gets| and | deals| you| if)/) || [])[0];
+      let altText = alt;
+      if (targetPhrase) altText = altText.replace(/\bthat (?:creature|permanent|player|card)\b/, targetPhrase);
+      const normal = interpretEffectText(prev), boosted = interpretEffectText(altText);
+      if (!normal.length || boosted.length !== normal.length || isFullyUnsupported(boosted)) continue;
+      const steps = normal.map((step, k) => ({ ...step, resolve: (game, ctx) => (test(game, ctx) ? boosted[k] : step).resolve(game, ctx) }));
+      if (prevIdx >= 0) { sentences.splice(prevIdx, 2); lines[li] = sentences.join(' '); }
+      else { lines[li - 1] = ''; sentences.splice(i, 1); lines[li] = sentences.join(' '); }
+      return { steps, text: lines.join('\n') };
+    }
+  }
+  return null;
+}
+
 // Turns one already-lowercased chunk of oracle text into a list of effect
 // steps. Shared by spells, triggered abilities, and activated abilities so
 // they all recognize the same vocabulary of effects.
 function interpretEffectText(text) {
   const steps = [];
+  text = stripAbilityWords(text);
+  for (let guard = 0; guard < 3; guard++) {
+    const pair = extractInsteadPair(text);
+    if (!pair) break;
+    steps.push(...pair.steps);
+    text = pair.text;
+  }
 
   // Reminder text in parentheses restates rules already given in plain
   // English elsewhere on the same line (e.g. Monstrosity's own "(If this
@@ -474,6 +668,70 @@ function interpretEffectText(text) {
     text = text.slice(0, revealMatch.index) + text.slice(revealMatch.index + revealMatch[0].length);
   }
 
+  // Kinship: "You may look at the top card of your library. If it shares a
+  // creature type with this creature, you may reveal it. If you do, EFFECT."
+  const kinship = text.match(/(?:you may )?look at the top card of your library\. if it shares a creature type with this creature, you may reveal it\. if you do, ([^.]+)\.?/);
+  if (kinship) {
+    const inner = interpretEffectText(kinship[1]);
+    steps.push({ kind: 'kinship', targeting: 'none', resolve: (game, ctx) => {
+      const top = game.getPlayer(ctx.controllerId).library[0];
+      if (top && ctx.sourcePerm && game.sharesCreatureType(top, ctx.sourcePerm.card)) {
+        game.log(`${ctx.card.name} reveals ${top.name} (kinship).`);
+        game.resolveEffectSteps(inner, [], ctx);
+      }
+    } });
+    text = text.replace(kinship[0], '');
+  }
+  // Voting (Will of the council, Council's dilemma, Secret council):
+  // "Starting with you, each player votes for A or B. For each A vote,
+  // EFFECT. For each B vote, EFFECT." / "If A gets more votes [or the vote
+  // is tied], EFFECT. If B gets more votes, EFFECT."
+  const vote = text.match(/(?:starting with you, )?each player (?:secretly )?votes for (\w+) or (\w+)\.([^\n]*)/);
+  if (vote) {
+    const [a, b] = [vote[1], vote[2]];
+    const rest = vote[3];
+    const per = {}, more = {};
+    for (const opt of [a, b]) {
+      const pm = rest.match(new RegExp(`for each ${opt} vote, ([^.]+)`));
+      if (pm) per[opt] = interpretEffectText(pm[1].replace(/^you /, ''));
+      const mm = rest.match(new RegExp(`if ${opt} gets more votes(?: or the vote is tied)?, ([^.]+)`));
+      if (mm) more[opt] = { steps: interpretEffectText(mm[1]), tie: new RegExp(`if ${opt} gets more votes or the vote is tied`).test(rest) };
+    }
+    steps.push({ kind: 'vote', targeting: 'none', resolve: (game, ctx) => game.runVote(ctx, [a, b], per, more) });
+    text = text.replace(vote[0], '');
+  }
+  // Join forces: "Starting with you, each player may pay any amount of
+  // mana. EFFECT, where X is the total amount of mana paid this way."
+  const join = text.match(/starting with you, each player may pay any amount of mana\. ([^.]+), where x is the total amount of mana paid this way\.?/);
+  if (join) {
+    const inner = interpretEffectText(join[1]);
+    steps.push({ kind: 'joinForces', targeting: 'none', resolve: (game, ctx) => game.resolveEffectSteps(inner, [], { ...ctx, xValue: game.runJoinForces(ctx) }) });
+    text = text.replace(join[0], '');
+  }
+  // Parley: "Each player reveals the top card of their library. For each
+  // nonland card revealed this way, EFFECT. Then each player draws a card."
+  const parley = text.match(/each player reveals the top card of their library\. for each nonland card revealed this way, ([^.]+)\.(?: then each player draws a card\.?)?/);
+  if (parley) {
+    const inner = interpretEffectText(parley[1]);
+    steps.push({ kind: 'parley', targeting: 'none', resolve: (game, ctx) => {
+      const n = game.players.filter(pl => pl.library[0] && !game.isLand(pl.library[0])).length;
+      game.log(`Parley: ${game.players.map(pl => pl.library[0]?.name || 'nothing').join(', ')} revealed (${n} nonland).`);
+      for (let i = 0; i < n; i++) game.resolveEffectSteps(inner, [], ctx);
+      for (const pl of game.players) game.drawCard(pl);
+    } });
+    text = text.replace(parley[0], '');
+  }
+  // Tempting offer: "EFFECT. Each opponent may EFFECT. For each opponent
+  // who does, EFFECT again" — the opponent decides (the AI takes it when
+  // the effect is something it would want: cards, tokens, life, mana).
+  const tempt = text.match(/each opponent may ([^.]+)\. for each opponent who does, ([^.]+)\.?/);
+  if (tempt) {
+    const theirs = interpretEffectText(tempt[1].replace(/\btheir\b/g, 'your').replace(/\bthey\b/g, 'you'));
+    const again = interpretEffectText(tempt[2].replace(/\s*again$/, '').replace(/^(?:you )?/, ''));
+    steps.push({ kind: 'tempt', targeting: 'none', resolve: (game, ctx) => game.runTemptingOffer(ctx, theirs, again, tempt[1]) });
+    text = text.replace(tempt[0], '');
+  }
+
   const clauses = text.split(/[.\n]/).map(c => c.trim()).filter(Boolean);
 
   for (let clause of clauses) {
@@ -486,6 +744,38 @@ function interpretEffectText(text) {
     // unsupported purely because of this prefix).
     clause = clause.replace(/^you may /, '');
     let m;
+
+    // "Destroy target creature if it has mana value 2 or less" (Fatal Push)
+    // — a condition on the target itself.
+    if ((m = clause.match(/^destroy target creature if it has mana value (\d+) or less$/))) {
+      const n = parseInt(m[1], 10);
+      steps.push({ kind: 'destroy', targeting: 'creature', resolve: (game, ctx) => { const p = game.findPermanent(ctx.target?.id); if (p && (p.card.cmc || 0) <= n) game.applyDestroyEffect(ctx); } });
+      continue;
+    }
+    // "This creature deals 2 damage to it" — "it" being the creature whose
+    // entering triggered this (Marauding Raptor).
+    if ((m = clause.match(/^(?:this creature|it) deals (\d+) damage to it$/))) {
+      const n = parseInt(m[1], 10);
+      steps.push({ kind: 'damage', targeting: 'none', resolve: (game, ctx) => { if (ctx.enteredPerm && game.findPermanent(ctx.enteredPerm.id)) game.applyDamageEffect({ ...ctx, target: { type: 'permanent', id: ctx.enteredPerm.id } }, n); } });
+      continue;
+    }
+    // Ability-word conditions: "if you attacked this turn, EFFECT" (Raid),
+    // "if seven or more cards are in your graveyard, EFFECT" (Threshold),
+    // ... — any condition parseCondition understands.
+    if ((m = clause.match(/^if (.+?),\s*(.+)$/)) && parseCondition(m[1])) {
+      const inner = interpretEffectText(m[2]);
+      if (!isFullyUnsupported(inner)) { steps.push(...conditional(inner, parseCondition(m[1]))); continue; }
+    }
+    // "..., where X is the number of basic land types among lands you
+    // control" (Domain, Converge, Undergrowth, Vivid, Chroma, ...).
+    if ((m = clause.match(/^(.+?),? where x is (.+)$/)) && parseCount(m[2])) {
+      const count = parseCount(m[2]);
+      const inner = interpretEffectText(m[1]);
+      if (!isFullyUnsupported(inner)) {
+        steps.push(...inner.map(step => ({ ...step, resolve: (game, ctx) => step.resolve(game, { ...ctx, xValue: count(game, ctx) }) })));
+        continue;
+      }
+    }
 
     // "deals twice X damage to ..." (Torch the Witness) — checked before the
     // plain damage regex below so its "twice" doesn't get swallowed as part
@@ -1049,6 +1339,42 @@ function interpretEffectText(text) {
       continue;
     }
 
+    // "EFFECT if COND" / "EFFECT unless COND" with an ability-word condition
+    // (Ferocious's "That creature also gains trample until end of turn if
+    // you control a creature with power 4 or greater"; Infusion's "sacrifice
+    // a permanent unless you gained life this turn").
+    if ((m = clause.match(/^(.+) (if|unless) (.+)$/)) && parseCondition(m[3])) {
+      const test = parseCondition(m[3]);
+      const inner = interpretEffectText(m[1].replace(/\balso /, ''));
+      if (!isFullyUnsupported(inner)) {
+        steps.push(...conditional(inner, m[2] === 'if' ? test : (g, c) => !test(g, c)));
+        continue;
+      }
+    }
+    // "Double this creature's power until end of turn" (Devilish Valet).
+    if (/^double (?:this creature'?s|its) power until end of turn$/.test(clause)) {
+      steps.push({ kind: 'pump', targeting: 'none', resolve: (game, ctx) => { if (ctx.sourcePerm) game.applyPumpEffect({ ...ctx, target: { type: 'permanent', id: ctx.sourcePerm.id } }, Math.max(0, game.effectivePower(ctx.sourcePerm)), 0); } });
+      continue;
+    }
+    // "You draw X cards and lose X life" (Converge's Painful Truths, after
+    // its "where X is ..." count is applied).
+    if (/^you draw x cards and lose x life$/.test(clause)) {
+      steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => { const x = ctx.xValue || 0; game.applyDrawEffect(ctx, x); game.applyLifegainEffect(ctx, -x); } });
+      continue;
+    }
+    // "It deals damage to target creature equal to <count>" / "deals damage
+    // equal to <count> to any target" (Chroma, Fathomless descent, ...).
+    if ((m = clause.match(/^(?:it|this creature|this spell|[\w',\s]+?) deals damage to (target [\w\s]+?|any target) equal to (.+)$/)) && parseCount(m[2])) {
+      const count = parseCount(m[2]);
+      steps.push({ kind: 'damage', targeting: describeTargetKind(m[1]), resolve: (game, ctx) => game.applyDamageEffect(ctx, count(game, ctx)) });
+      continue;
+    }
+    if ((m = clause.match(/^(?:it|this creature|this spell|[\w',\s]+?) deals damage equal to (.+?) to (target [\w\s]+?|any target)$/)) && parseCount(m[1])) {
+      const count = parseCount(m[1]);
+      steps.push({ kind: 'damage', targeting: describeTargetKind(m[2]), resolve: (game, ctx) => game.applyDamageEffect(ctx, count(game, ctx)) });
+      continue;
+    }
+
     // "Two target players each draw a card" (Huddle Up).
     if ((m = clause.match(/^(two|three) target players each draw (a|an|one|two|three|\d+) cards?$/))) {
       const count = parseAmount(m[1]), amount = parseAmount(m[2]);
@@ -1259,6 +1585,30 @@ function interpretEffectText(text) {
         targeting: 'none',
         resolve: (game, ctx) => game.applyMassPumpEffect(ctx, scope, power, toughness, { excludeSelf, keywordText }),
       });
+      continue;
+    }
+
+    // "Creatures you control gain indestructible until end of turn" (Rally,
+    // Battalion) — keywords only, no stat change; "attacking creatures you
+    // control" restricts it to attackers.
+    if ((m = clause.match(/^(other |attacking )?creatures (you control|your opponents control) gain ([a-z,\s]+?) until end of turn$/))) {
+      const qualifier = (m[1] || '').trim();
+      const scope = m[2] === 'you control' ? 'you' : 'opponents';
+      const keywordText = m[3];
+      steps.push({ kind: 'pump', targeting: 'none', resolve: (game, ctx) => game.applyMassPumpEffect(ctx, scope, 0, 0, { excludeSelf: qualifier === 'other', attackingOnly: qualifier === 'attacking', keywordText }) });
+      continue;
+    }
+    // Keyword counters: "put a flying counter, a deathtouch counter, and a
+    // lifelink counter on target creature" / "two +1/+1 counters and a
+    // flying counter on ..." (recent sets; keyword counters grant their
+    // keyword for as long as they're there).
+    if ((m = clause.match(/^put ((?:(?:a|an|one|two|three|\d+) [\w+/-]+ counters?(?:,? and |, )?)+) on (target [\w\s]+?|this creature|it)$/)) && /(?:flying|deathtouch|lifelink|trample|vigilance|reach|menace|hexproof|indestructible|first strike|double strike|haste) counter/.test(m[1])) {
+      const parts = [...m[1].matchAll(/(a|an|one|two|three|\d+) ([\w+/-]+(?: strike)?) counters?/g)].map(x => ({ n: parseAmount(x[1]), type: x[2] }));
+      const self = !/^target/.test(m[2]);
+      steps.push({ kind: 'counters', targeting: self ? 'none' : describeTargetKind(m[2]), resolve: (game, ctx) => {
+        const target = self ? { type: 'permanent', id: ctx.sourcePerm?.id } : ctx.target;
+        for (const part of parts) game.applyCounterAdditionEffect({ ...ctx, target }, part.n, part.type);
+      } });
       continue;
     }
 
@@ -1621,7 +1971,7 @@ function interpretEffectText(text) {
     // (Bloodforged Battle-Axe's own attachedCreature-scoped combat-damage
     // trigger) — ctx.card is already the source's own card for this
     // trigger shape.
-    if (/^create a token that'?s a copy of this (?:equipment|artifact|permanent)$/.test(clause)) {
+    if (/^create a token that'?s a copy of (?:this (?:equipment|artifact|permanent|creature|enchantment)|it)$/.test(clause)) {
       steps.push({
         kind: 'tokenCopy',
         targeting: 'none',
@@ -3472,7 +3822,7 @@ export function interpretTapAbilities(card) {
     const steps = interpretEffectText(effectText.toLowerCase());
     // Exhaust (once per game) and Boast (only if it attacked this turn,
     // once per turn) — enforced by game.js.
-    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), sacrificeCost, payLife, manaCost, sorcerySpeedOnly: isSorcerySpeedOnlyLine(line), exhaust: /^exhaust\b/i.test(costText.trim()), boast: /^boast\b/i.test(costText.trim()), exileCreatureCost, maxSpeed });
+    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), sacrificeCost, payLife, manaCost, sorcerySpeedOnly: isSorcerySpeedOnlyLine(line), exhaust: /^exhaust\b/i.test(costText.trim()), boast: /^boast\b/i.test(costText.trim()), exileCreatureCost, maxSpeed, activateOnlyIf: (line.match(/activate only if (.+?)\.?$/i) || [])[1] || null });
   }
   if (abilities.length === 0 || abilities.every(a => isFullyUnsupported(a.steps))) {
     const aiAbilities = getAITapAbilities(card);
@@ -3552,21 +3902,23 @@ export function interpretNonTapAbilities(card) {
     const bracketed = costText.match(/\{[^}]+\}/g) || [];
     const payableSymbols = bracketed.filter(isPayableManaSymbol);
     const sacMatch = costText.match(/sacrifice (another creature|a creature|this creature|~)/i);
+    // Grandeur: "Discard another card named [this]" as the cost.
+    const discardNamed = /discard another card named/i.test(costText);
     // "Remove N [name] counters from this creature/permanent/it" (Thallid's
     // "Remove three spore counters from this creature: Create a Saproling",
     // and the same shape on any counter-accumulating threshold ability) — a
     // cost paid from the permanent's own counters, not mana or a sacrifice.
     const removeCountersMatch = costText.match(/remove (\d+|a|an|one|two|three|four|five) ([a-z]+) counters? from (?:this (?:creature|permanent)|it)/i);
     const manaCost = payableSymbols.join('');
-    if (!manaCost && !sacMatch && !removeCountersMatch) continue; // doesn't look like a cost we recognize at all
-    const effectText = m[2];
+    if (!manaCost && !sacMatch && !removeCountersMatch && !discardNamed) continue; // doesn't look like a cost we recognize at all
+    const effectText = m[2].replace(/\s*activate only if [^.]+\.?$/i, '');
     // Self-name normalized ("Put three +1/+1 counters on Human Torch").
     const steps = interpretEffectText(replaceSelfName(card, effectText, 'this creature').toLowerCase());
     let sacrifice = null;
     if (sacMatch) sacrifice = /another/i.test(sacMatch[1]) ? 'other' : (/this|~/i.test(sacMatch[1]) ? 'self' : 'any');
     let removeCounters = null;
     if (removeCountersMatch) removeCounters = { amount: parseAmount(removeCountersMatch[1]), counterType: removeCountersMatch[2].toLowerCase() };
-    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), manaCost, sacrifice, removeCounters, exhaust: /^exhaust\b/i.test(costText) || /^power-up\b/i.test(costText), boast: /^boast\b/i.test(costText), powerUp: /^power-up\b/i.test(costText), maxSpeed: /^max speed\b/i.test(costText) });
+    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), manaCost, sacrifice, removeCounters, exhaust: /^exhaust\b/i.test(costText) || /^power-up\b/i.test(costText), boast: /^boast\b/i.test(costText), powerUp: /^power-up\b/i.test(costText), maxSpeed: /^max speed\b/i.test(costText), discardNamed, activateOnlyIf: (line.match(/activate only if (.+?)\.?$/i) || [])[1] || null });
   }
   if (abilities.length === 0 || abilities.every(a => isFullyUnsupported(a.steps))) {
     const aiAbilities = getAINonTapAbilities(card);
@@ -4385,6 +4737,56 @@ export function hasHaunt(card) { return /^haunt\b/im.test(plainText(card)); }
 // "Splice onto Arcane {2}{R}" — the cost, or null.
 export function getSpliceCost(card) { return lineCost(card, 'splice onto arcane'); }
 
+// Ability-word trigger shapes that need their own dispatch points.
+function selfLineTriggers(card, re) {
+  const lines = stripAbilityWords(replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase().replace(/\([^()]*\)/g, '')).split('\n').map(x => x.trim());
+  const steps = [];
+  for (const line of lines) { const m = line.match(re); if (m) steps.push(...interpretEffectText(m[m.length - 1])); }
+  return steps;
+}
+// Enrage: "Whenever this creature is dealt damage, EFFECT".
+export function interpretDealtDamageTriggers(card) { return selfLineTriggers(card, /^whenever this creature is dealt damage,\s*(.+)$/); }
+// Inspired: "Whenever this creature becomes untapped, EFFECT".
+export function interpretUntapTriggers(card) { return selfLineTriggers(card, /^whenever this creature becomes untapped,\s*(.+)$/); }
+// Survival: "At the beginning of your second main phase, EFFECT".
+export function interpretSecondMainTriggers(card) { return selfLineTriggers(card, /^at the beginning of your second main phase,\s*(.+)$/); }
+// Battalion: "Whenever this creature and at least two other creatures attack, EFFECT" → { min, steps }.
+export function interpretBattalionTriggers(card) {
+  const lines = stripAbilityWords(replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase()).split('\n').map(x => x.trim());
+  const out = [];
+  for (const line of lines) { const m = line.match(/^whenever this creature and at least (\w+) other creatures attack,\s*(.+)$/); if (m) out.push({ min: num(m[1]), steps: interpretEffectText(m[2]) }); }
+  return out;
+}
+// Flurry: "Whenever you cast your second spell each turn, EFFECT".
+export function interpretNthSpellTriggers(card) {
+  const lines = stripAbilityWords(replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase()).split('\n').map(x => x.trim());
+  const out = [];
+  for (const line of lines) { const m = line.match(/^whenever you cast your (first|second|third) spell each turn,\s*(.+)$/); if (m) out.push({ n: { first: 1, second: 2, third: 3 }[m[1]], steps: interpretEffectText(m[2]) }); }
+  return out;
+}
+// Valiant: "Whenever this creature becomes the target of a spell or ability
+// you control for the first time each turn, EFFECT".
+export function interpretValiantTriggers(card) { return selfLineTriggers(card, /^whenever this creature becomes the target of a spell or ability you control for the first time each turn,\s*(.+)$/); }
+// Hand abilities: "COST, Discard this card: EFFECT" (Channel, Bloodrush) —
+// [{ manaCost, effectText, steps, attackingTarget }].
+export function getHandAbilities(card) {
+  const out = [];
+  for (const line of stripAbilityWords((card.oracleText || '').replace(/\([^()]*\)/g, '')).split('\n')) {
+    const m = line.trim().match(/^((?:\{[^}]+\})*),?\s*discard this card:\s*(.+)$/i);
+    if (!m) continue;
+    const effectText = m[2].trim();
+    out.push({ manaCost: (m[1].match(/\{[^}]+\}/g) || []).filter(isPayableManaSymbol).join(''), effectText, steps: interpretEffectText(effectText.toLowerCase().replace(/target attacking creature/, 'target creature')), attackingTarget: /target attacking creature/i.test(effectText) });
+  }
+  return out;
+}
+// Renew: "Renew — COST, Exile this card from your graveyard: EFFECT".
+export function getRenew(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^renew\s*—\s*((?:\{[^}]+\})+),\s*exile this card from your graveyard:\s*(.+?)(?:\s*activate only as a sorcery\.?)?$/im);
+  return m ? { manaCost: m[1], steps: interpretEffectText(m[2].toLowerCase()), effectText: m[2] } : null;
+}
+// Strive: "This spell costs {N} more to cast for each target beyond the first."
+export function getStriveCost(card) { const m = (card.oracleText || '').match(/this spell costs ((?:\{[^}]+\})+) more to cast for each target beyond the first/i); return m ? m[1] : null; }
+
 // Batch 12 readers.
 // "More Than Meets the Eye {2}{R}" — cast it converted (back face) for that.
 export function getConvertCost(card) { return lineCost(card, 'more than meets the eye'); }
@@ -4682,6 +5084,7 @@ function escapeRegExp(s) {
 // normalized to `replacement` here, the same substitution a player makes
 // mentally when reading their own card. Shared by every trigger interpreter
 // that needs this (sacrifice, tribal-ETB, ...).
+export function replaceSelfNameExport(card, text, replacement) { return replaceSelfName(card, text, replacement); }
 function replaceSelfName(card, text, replacement) {
   const shortName = card.name.split(',')[0].trim();
   const namePattern = new RegExp(`\\b(?:${escapeRegExp(card.name)}|${escapeRegExp(shortName)})\\b`, 'gi');
@@ -4690,7 +5093,8 @@ function replaceSelfName(card, text, replacement) {
   // ..."): they have no rules meaning, but every trigger pattern is anchored
   // at the start of the line, so the trigger used to go unrecognized.
   return text.replace(namePattern, replacement)
-    .replace(/^[A-Za-z][\w' ,-]*? — (?=(?:when|whenever|at|as)\b)/gim, '');
+    .replace(/^[A-Za-z][\w' ,-]*? — (?=(?:when|whenever|at|as)\b)/gim, '')
+    .replace(/ and whenever you fully unlock a room/gi, '');
 }
 
 // "Whenever you sacrifice a permanent/creature/artifact, EFFECT" (Korvold,

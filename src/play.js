@@ -357,6 +357,22 @@ function renderGraveyardView() {
     }
     // Flashback and Escape — casting straight out of the graveyard on an
     // alternative cost (see game.js's castFromGraveyard).
+    // Renew: exile it from the graveyard for its effect.
+    if (player.id === HUMAN_ID && !watchMode && game.canRenew(HUMAN_ID, card.instanceId)) {
+      const r = game.getRenew(card);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'action-button primary graveyard-activate-button';
+      btn.textContent = `Renew ${r.manaCost}`;
+      btn.addEventListener('click', () => {
+        if (ui.abilityChoice || ui.targeting || game.pendingRequest) return;
+        const kinds = game.expandTargetKinds(r.steps);
+        if (!kinds.length) { game.renew(HUMAN_ID, card.instanceId, []); return; }
+        ui.targeting = { source: 'renew', card, kinds, collected: [] };
+        render();
+      });
+      div.appendChild(btn);
+    }
     // (Also Jump-start, Retrace, and Mayhem — one button per way it can be
     // cast from here right now.)
     if (player.id === HUMAN_ID && !watchMode) {
@@ -562,7 +578,7 @@ function render() {
   if (game.gameOver) {
     el('gameover-overlay').hidden = false;
     const won = game.winner === HUMAN_ID;
-    el('gameover-text').textContent = won ? 'You win!' : 'You lose.';
+    el('gameover-text').textContent = game.isDraw ? 'Draw.' : won ? 'You win!' : 'You lose.';
   }
 }
 
@@ -1315,6 +1331,16 @@ function handCardAlternatives(card) {
   if (game.canPlayLand(HUMAN_ID)) {
     for (const lf of game.landFaces(card)) options.push({ label: `Play ${lf.name}`, execute: () => game.playLandFace(HUMAN_ID, card.instanceId, lf.index) });
   }
+  // "COST, Discard this card: EFFECT" (Channel, Bloodrush).
+  game.getHandAbilities(card).forEach((ab, i) => {
+    if (!game.canActivateHandAbility(HUMAN_ID, card.instanceId, i)) return;
+    options.push({ label: `${ab.manaCost ? ab.manaCost + ', ' : ''}discard: ${ab.effectText}`, execute: () => {
+      const kinds = game.expandTargetKinds(ab.steps);
+      if (!kinds.length) { const r = game.activateHandAbility(HUMAN_ID, card.instanceId, i, []); if (!r.ok) showAlert(r.reason); return; }
+      ui.targeting = { source: 'handAbility', card, kinds, collected: [], handAbilityIndex: i };
+      render();
+    } });
+  });
   const faceDown = game.getFaceDownCost(card);
   if (faceDown && game.canCastFaceDown(HUMAN_ID, card.instanceId)) {
     options.push({ label: `Cast face down as a 2/2 for {3} (${faceDown.kind} ${faceDown.cost} to turn up)`, execute: () => { const r = game.castFaceDown(HUMAN_ID, card.instanceId); if (!r.ok) showAlert(r.reason); } });
@@ -1704,6 +1730,8 @@ function handleTargetPick(target) {
       else if (t.source === 'nonTapAbility') game.activateNonTapAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
       else if (t.source === 'loyaltyAbility') game.activateLoyaltyAbility(HUMAN_ID, t.permId, t.abilityIndex, t.collected);
       else if (t.source === 'graveyardAbility') game.activateGraveyardAbility(HUMAN_ID, t.cardInstanceId, t.collected);
+      else if (t.source === 'handAbility') { const r = game.activateHandAbility(HUMAN_ID, t.card.instanceId, t.handAbilityIndex, t.collected); if (!r.ok) showAlert(r.reason); }
+      else if (t.source === 'renew') { const r = game.renew(HUMAN_ID, t.card.instanceId, t.collected); if (!r.ok) showAlert(r.reason); }
       else if (t.source === 'commander') game.castCommander(HUMAN_ID, t.collected, t.xValue || 0, t.commanderIndex || 0);
       else if (t.fromExile) game.playCardFromExile(HUMAN_ID, t.fromExile, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null });
       else if (t.fromGraveyard) game.castFromGraveyard(HUMAN_ID, t.fromGraveyard.cardInstanceId, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null, viaEscape: t.fromGraveyard.viaEscape, via: t.fromGraveyard.via, discardId: t.fromGraveyard.discardId });
