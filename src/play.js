@@ -1759,6 +1759,9 @@ function getAvailableActionsForPermanent(perm) {
     }
   });
 
+  if (game.canLevelUp(HUMAN_ID, perm.id)) {
+    actions.push({ label: `Level up ${game.getLevelUp(perm._baseCard || perm.card).cost} (level ${perm.counters.level || 0})`, execute: () => { const r = game.levelUp(HUMAN_ID, perm.id); if (!r.ok) showAlert(r.reason); } });
+  }
   if (game.canCraft(HUMAN_ID, perm.id)) {
     const info = game.getCraft(perm._dfcCard || perm.card);
     actions.push({ label: `Craft with ${info.material} (${info.manaCost})`, execute: () => { const r = game.craft(HUMAN_ID, perm.id); if (!r.ok) showAlert(r.reason); } });

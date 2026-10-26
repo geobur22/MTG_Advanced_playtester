@@ -663,6 +663,11 @@ export function takeAITurnAction(game) {
       }
     }
 
+    // Level up Leveler creatures with spare mana in main 2.
+    if (game.step === 'main2') {
+      for (const perm of p.battlefield) if (game.getLevelUp(perm._baseCard || perm.card) && game.canLevelUp(p.id, perm.id) && game.levelUp(p.id, perm.id).ok) return;
+    }
+
     // Craft whenever possible (the back face is the payoff).
     for (const perm of p.battlefield) {
       if (game.getCraft(perm._dfcCard || perm.card) && game.canCraft(p.id, perm.id) && game.craft(p.id, perm.id).ok) return;

@@ -4348,6 +4348,27 @@ export function getDevotionRequirement(card) {
   return { colors: [COLOR[m[1].toLowerCase()], m[2] && COLOR[m[2].toLowerCase()]].filter(Boolean), need: parseAmount(m[3].toLowerCase()) };
 }
 
+// Level Up (Leveler creatures): "Level up {W}" plus "LEVEL 2-6 / 3/3 /
+// abilities" blocks. Returns { cost, base: text before the first block,
+// tiers: [{ min, max, power, toughness, text }] } or null.
+export function getLevelUp(card) {
+  const raw = card.oracleText || '';
+  const cost = (plainText(card).match(/^level up ((?:\{[^}]+\})+)/im) || [])[1];
+  if (!cost) return null;
+  const lines = raw.split('\n');
+  const firstTier = lines.findIndex(l => /^LEVEL \d+/.test(l.trim()));
+  const tiers = [];
+  let cur = null;
+  for (const l of lines.slice(firstTier < 0 ? lines.length : firstTier)) {
+    const m = l.trim().match(/^LEVEL (\d+)(?:-(\d+)|\+)$/);
+    if (m) { cur = { min: parseInt(m[1], 10), max: m[2] ? parseInt(m[2], 10) : Infinity, power: null, toughness: null, lines: [] }; tiers.push(cur); continue; }
+    const pt = l.trim().match(/^(\d+)\/(\d+)$/);
+    if (cur && pt && cur.power == null) { cur.power = pt[1]; cur.toughness = pt[2]; continue; }
+    if (cur) cur.lines.push(l);
+  }
+  return { cost, base: lines.slice(0, firstTier < 0 ? lines.length : firstTier).join('\n'), tiers: tiers.map(t => ({ ...t, text: t.lines.join('\n') })) };
+}
+
 // Batch 12 readers.
 // "More Than Meets the Eye {2}{R}" — cast it converted (back face) for that.
 export function getConvertCost(card) { return lineCost(card, 'more than meets the eye'); }

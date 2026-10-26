@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending, getReconfigureCost, hasLivingWeapon, hasLivingMetal, hasStation, getStationInfo, getDevotionRequirement, getConvertCost, getCraft } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending, getReconfigureCost, hasLivingWeapon, hasLivingMetal, hasStation, getStationInfo, getDevotionRequirement, getConvertCost, getCraft, getLevelUp } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -3919,6 +3919,28 @@ export class Game {
     this.checkStateBasedActions();
   }
 
+  // Level up {cost}: put a level counter on it (sorcery speed).
+  canLevelUp(playerId, permId) {
+    const perm = this.findPermanent(permId);
+    if (!perm || perm.controllerId !== playerId || this.gameOver || this.pendingRequest || this.splitSecondActive()) return false;
+    const lu = getLevelUp(perm._baseCard || perm.card);
+    if (!lu || !(this.active.id === playerId && this.priorityPlayer.id === playerId && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    return this.payableNow(playerId, lu.cost);
+  }
+
+  levelUp(playerId, permId) {
+    if (!this.canLevelUp(playerId, permId)) return { ok: false, reason: "Can't level up right now." };
+    const perm = this.findPermanent(permId);
+    this.payNow(playerId, getLevelUp(perm._baseCard || perm.card).cost);
+    perm.counters.level = (perm.counters.level || 0) + 1;
+    this.refreshCardState(perm);
+    this.log(`${perm.card.name} levels up (level ${perm.counters.level}).`);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  getLevelUp(card) { return getLevelUp(card); }
+
   // ---------- Batch 13: Partner, Companion ----------
   // Companion: once per game, pay {3} at sorcery speed to put your companion
   // (from outside the game) into your hand.
@@ -4120,7 +4142,7 @@ export class Game {
     const base = perm.card;
     let tracked = CARD_STATE_MEMO.get(base);
     if (tracked === undefined) {
-      tracked = !!(getReconfigureCost(base) || hasLivingMetal(base) || hasStation(base) || getDevotionRequirement(base) || this.keywordAmount(base, 'crew'));
+      tracked = !!(getReconfigureCost(base) || hasLivingMetal(base) || hasStation(base) || getDevotionRequirement(base) || this.keywordAmount(base, 'crew') || getLevelUp(base));
       CARD_STATE_MEMO.set(base, tracked);
     }
     return tracked;
@@ -4144,6 +4166,15 @@ export class Game {
     if (getReconfigureCost(base) && perm.attachedTo) creature = false;
     if (perm.impending && (perm.counters.time || 0) > 0) creature = false;
     let card = { ...base, oracleText: text };
+    // Level Up: the level-counter tier in effect sets stats and abilities.
+    const leveler = getLevelUp(base);
+    if (leveler) {
+      const level = perm.counters.level || 0;
+      const tier = leveler.tiers.find(t => level >= t.min && level <= t.max);
+      card.oracleText = tier ? `${leveler.base}\n${tier.text}` : leveler.base;
+      card.keywords = [...new Set([...extractKnownKeywords(card.oracleText.toLowerCase())])];
+      if (tier?.power != null) { card.power = tier.power; card.toughness = tier.toughness; }
+    }
     if (station) {
       // Keywords on station lines count only once unlocked.
       const charge = perm.counters.charge || 0;
@@ -4155,7 +4186,7 @@ export class Game {
       card = { ...card, typeLine: withCreatureType(base.typeLine, true, 'Elemental'), power: '0', toughness: '0', keywords: [...new Set([...(base.keywords || []), 'haste'])] };
     } else if (creature !== null && creature !== isCreature(base)) {
       card = { ...card, typeLine: withCreatureType(base.typeLine, creature) };
-    } else if (text === (base.oracleText || '') && !station) {
+    } else if (text === (base.oracleText || '') && !station && !leveler) {
       card = base;
     }
     if (card === base) { if (perm._baseCard) { perm.card = base; delete perm._baseCard; } return; }
