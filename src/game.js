@@ -75,7 +75,7 @@ function conditionalStatics(card) {
     if (!m) continue;
     const test = parseCondition(m[1]);
     if (!test) continue;
-    const body = m[2];
+    const body = m[2].replace(/^artifacts and creatures you control /, 'creatures you control ');
     const self = body.match(/^(?:this creature|it) (?:gets ([+-]\d+)\/([+-]\d+)(?: and (?:has|gains) (.+))?|(?:has|gains) (.+))$/);
     if (self) { out.push({ test, self: { power: self[1] ? parseInt(self[1], 10) : 0, toughness: self[2] ? parseInt(self[2], 10) : 0, grant: self[3] || self[4] || '' } }); continue; }
     if (/^(?:this creature|it) can'?t be blocked$/.test(body)) { out.push({ test, self: { power: 0, toughness: 0, grant: 'unblockable' } }); continue; }
@@ -1315,7 +1315,11 @@ export class Game {
         // applyPayToUntapEffect), or a one-shot flag an external effect
         // applied (Frost Breath's "doesn't untap during its controller's
         // next untap step") — consumed here regardless of which caused it.
-        const staticSkip = /this (?:artifact|creature|permanent) doesn'?t untap during your untap step/.test((perm.card.oracleText || '').toLowerCase());
+        const selfText = replaceSelfNameExport(perm.card, perm.card.oracleText || '', 'this creature').toLowerCase();
+        const unlessUntap = selfText.match(/this (?:artifact|creature|permanent) doesn'?t untap during your untap step unless ([^.]+)/);
+        const staticSkip = unlessUntap
+          ? !(parseCondition(unlessUntap[1])?.(this, { controllerId: perm.controllerId, sourcePerm: perm, card: perm.card }) ?? true)
+          : /this (?:artifact|creature|permanent) doesn'?t untap during your untap step/.test(selfText);
         if (staticSkip || perm.skipNextUntap) {
           perm.skipNextUntap = false;
         } else {
@@ -2287,7 +2291,7 @@ export class Game {
     const others = exiled.filter(c => c !== hit);
     this.requestChoice(p.id, `Cascade: cast ${hit.name} without paying its mana cost?`, [
       { label: `Cast ${hit.name} for free`, resolve: () => {
-        if (!this.castFromOutsideHand(p.id, hit, { free: true, fromZone: 'exile' })) { this.log(`${hit.name} can't be cast right now.`); others.push(hit); }
+        if (!this.castFromOutsideHand(p.id, hit, { free: true, fromZone: 'exile', onFail: () => p.library.push(hit) })) { this.log(`${hit.name} can't be cast right now.`); others.push(hit); }
         p.library.push(...shuffle(others));
       } },
       { label: 'Put it on the bottom', resolve: () => p.library.push(...shuffle(exiled)) },
@@ -2304,7 +2308,7 @@ export class Game {
     p.library.push(...revealed.filter(c => c.name !== card.name));
     for (const c of matches) {
       this.requestChoice(p.id, `Ripple: cast ${c.name} for free?`, [
-        { label: `Cast ${c.name} for free`, resolve: () => { if (!this.castFromOutsideHand(p.id, c, { free: true, fromZone: 'other' })) p.library.push(c); } },
+        { label: `Cast ${c.name} for free`, resolve: () => { if (!this.castFromOutsideHand(p.id, c, { free: true, fromZone: 'other', onFail: () => p.library.push(c) })) p.library.push(c); } },
         { label: 'Put it on the bottom', resolve: () => p.library.push(c) },
       ], 0);
     }
@@ -3303,11 +3307,12 @@ export class Game {
     if (this.pendingRequest?.type !== 'etbTarget' || this.pendingRequest.playerId !== playerId) return false;
     this.pendingRequest.collected.push(target);
     if (this.pendingRequest.collected.length >= this.pendingRequest.kinds.length) {
-      const { steps, ctxBase } = this._pendingETB;
+      const { steps, ctxBase, onComplete } = this._pendingETB;
       const collected = this.pendingRequest.collected;
       this.pendingRequest = null;
       this._pendingETB = null;
-      this.resolveEffectSteps(steps, collected, ctxBase);
+      if (onComplete) onComplete(collected);
+      else this.resolveEffectSteps(steps, collected, ctxBase);
       this.checkStateBasedActions();
     }
     this.emit();
@@ -3951,11 +3956,30 @@ export class Game {
   // already there; on failure that temporary hand copy is removed again
   // and the caller decides where the card goes.
   castFromOutsideHand(playerId, card, castOpts = {}) {
+    const { onFail = null, ...opts } = castOpts;
+    castOpts = opts;
     const p = this.getPlayer(playerId);
     const wasInHand = p.hand.includes(card);
     if (!wasInHand) p.hand.push(card);
     const kinds = this.getRequiredTargetKinds(card);
     const targets = pickTargetsForKinds(this, card, playerId, kinds).filter(Boolean);
+    // A human chooses the targets themselves (the same prompt an ETB
+    // trigger uses); the cast happens once they're picked. If it then
+    // can't be cast, onFail puts the card where it belongs.
+    if (!p.isAI && kinds.length && this.getMinRequiredTargetCount(card) <= targets.length && !this.pendingRequest) {
+      this._pendingETB = { onComplete: (chosen) => {
+        const r = this.castSpell(playerId, card.instanceId, chosen, castOpts.xValue || 0, null, false, { bypassTiming: true, fromZone: wasInHand ? 'hand' : 'other', ...castOpts });
+        if (!r.ok && !wasInHand) {
+          const i = p.hand.findIndex(c => c.instanceId === card.instanceId);
+          if (i !== -1) p.hand.splice(i, 1);
+          this.log(`${card.name} can't be cast: ${r.reason}`);
+          onFail?.();
+        }
+      } };
+      this.pendingRequest = { type: 'etbTarget', playerId, cardName: card.name, kinds, collected: [], sourcePermId: null };
+      this.emit();
+      return true;
+    }
     let result = { ok: false };
     if (this.getMinRequiredTargetCount(card) <= targets.length) {
       result = this.castSpell(playerId, card.instanceId, targets, castOpts.xValue || 0, null, false, { bypassTiming: true, fromZone: wasInHand ? 'hand' : 'other', ...castOpts });
@@ -3966,6 +3990,7 @@ export class Game {
     }
     return result.ok;
   }
+
 
   // ---------- alternative casting costs ----------
   // Ways to cast `card` from hand for an alternative cost RIGHT NOW (the
@@ -4852,6 +4877,31 @@ export class Game {
     return { ok: true };
   }
 
+  // Meld: exile this permanent and its partner (both owned and controlled
+  // by the same player), then put the melded card onto the battlefield.
+  // The melded permanent remembers both cards — if it leaves, they go to
+  // the zone separately (cardsOf / mutateCards).
+  meldPermanents(perm, partnerName, resultName) {
+    if (!perm || !this.findPermanent(perm.id)) return;
+    const p = this.getPlayer(perm.controllerId);
+    const partner = p.battlefield.find(x => x.id !== perm.id && x.card.name.toLowerCase() === partnerName.toLowerCase() && x.ownerId === p.id);
+    if (!partner || perm.ownerId !== p.id) return;
+    const result = perm.card.meldResultCard || partner.card.meldResultCard;
+    if (!result) { this.log(`${perm.card.name} can't meld: ${resultName}'s card data wasn't loaded.`); return; }
+    for (const x of [perm, partner]) {
+      p.battlefield = p.battlefield.filter(y => y.id !== x.id);
+      this.detachFromLeavingBattlefield(x);
+      this.triggerLeavesBattlefield(x);
+    }
+    const melded = makePermanent({ ...result, instanceId: uid('meld') }, p.id);
+    melded.mutateCards = [perm.card, partner.card];
+    melded.card = { ...result, instanceId: melded.card.instanceId };
+    p.battlefield.push(melded);
+    this.log(`${perm.card.name} and ${partner.card.name} meld into ${result.name}.`);
+    this.checkStateBasedActions();
+    this.triggerETB(melded);
+  }
+
   // ---------- Infinite loops ----------
   // A chain of abilities that keeps re-triggering itself (Polyraptor +
   // Forerunner of the Empire) is cut off once one source has resolved
@@ -5450,7 +5500,7 @@ export class Game {
       p.battlefield.push(land);
       this.log(`${p.name} plays ${card.name} from hideaway.`);
       this.triggerETB(land);
-    } else if (!this.castFromOutsideHand(p.id, card, { free: true, fromZone: 'exile' })) {
+    } else if (!this.castFromOutsideHand(p.id, card, { free: true, fromZone: 'exile', onFail: () => { p.exile.push(card); perm.hideaway = card; } })) {
       p.exile.push(card);
       perm.hideaway = card;
       this.log(`${card.name} can't be cast right now.`);
@@ -5541,7 +5591,7 @@ export class Game {
     p.rebounding = [];
     for (const card of cards) {
       const castIt = () => {
-        if (!this.castFromOutsideHand(p.id, card, { free: true, fromZone: 'exile', viaRebound: true })) {
+        if (!this.castFromOutsideHand(p.id, card, { free: true, fromZone: 'exile', viaRebound: true, onFail: () => p.exile.push(card) })) {
           this.log(`${card.name} can't be cast from rebound right now; it stays in exile.`);
           p.exile.push(card);
           return;
@@ -5734,7 +5784,7 @@ export class Game {
       }
       p.suspended = p.suspended.filter(e => e !== entry);
       this.log(`The last time counter is removed from ${entry.card.name}.`);
-      if (!this.castFromOutsideHand(p.id, entry.card, { free: true, viaSuspend: true })) {
+      if (!this.castFromOutsideHand(p.id, entry.card, { free: true, viaSuspend: true, onFail: () => p.exile.push(entry.card) })) {
         p.exile.push(entry.card);
         this.log(`${entry.card.name} can't be cast and stays exiled.`);
       }
@@ -6052,7 +6102,28 @@ export class Game {
   // (e.g. "{1}"). A separate concept from tap abilities: equip has no {T} in
   // its cost and — unlike tap abilities — is sorcery-speed only.
   getEquipCost(perm) {
+    // Kíli the Resourceful: with an enduring story, the first equip each
+    // turn may cost {0}.
+    const p = this.getPlayer(perm.controllerId);
+    if (p?.enduringStory && p.kiliEquipTurn !== this.turnNumber && p.battlefield.some(x => /you may pay \{0\} rather than pay the equip cost of the first equip ability you activate each turn/i.test(x.card.oracleText || ''))) return '{0}';
     return interpretEquipCost(perm.card);
+  }
+
+  // Attack taxes on the defending player's side: Propaganda / Ghostly
+  // Prison ("Creatures can't attack you unless their controller pays {2}
+  // for each creature they control that's attacking you"), Collective
+  // Restraint (X = Domain), Dáin (conditional, {1}). The cost per attacker.
+  attackTaxPerCreature(defenderId) {
+    let total = 0;
+    for (const src of this.getPlayer(defenderId).battlefield) {
+      const text = stripAbilityWords(replaceSelfNameExport(src.card, src.card.oracleText || '', 'this creature').toLowerCase());
+      const m = text.match(/(?:as long as ([^,]+), )?creatures can'?t attack you(?: or planeswalkers you control)? unless their controller pays \{(\d+|x)\} for each (?:creature they control that'?s attacking you|of those creatures)(?:, where x is ([^.]+))?/);
+      if (!m) continue;
+      const ctx = { controllerId: defenderId, sourcePerm: src, card: src.card };
+      if (m[1] && !(parseCondition(m[1])?.(this, ctx))) continue;
+      total += m[2] === 'x' ? (parseCount(m[3] || '')?.(this, ctx) || 0) : parseInt(m[2], 10);
+    }
+    return total;
   }
 
   // "Equip abilities you activate that target this creature cost {N} less
@@ -6104,7 +6175,9 @@ export class Game {
     if (this.isProtectedFrom(target, equipPerm.card)) return { ok: false, reason: `${target.card.name} has protection from ${equipPerm.card.name}.` };
 
     const p = this.getPlayer(playerId);
-    const parsed = parseManaCost(this.getEquipCost(equipPerm));
+    const equipCost = this.getEquipCost(equipPerm);
+    if (equipCost === '{0}') this.getPlayer(playerId).kiliEquipTurn = this.turnNumber;
+    const parsed = parseManaCost(equipCost);
     parsed.generic = Math.max(0, parsed.generic - this.getEquipCostReduction(playerId, target.id));
     const untapped = p.battlefield.filter(perm => isLand(perm.card) && !perm.tapped);
     const payment = planManaPayment(untapped, parsed, 0, p.manaPool);
@@ -7335,7 +7408,7 @@ export class Game {
       const j = p.exile.indexOf(card);
       if (j === -1) return;
       p.exile.splice(j, 1);
-      if (this.castFromOutsideHand(p.id, card, { costOverride: madness, fromZone: 'exile' })) {
+      if (this.castFromOutsideHand(p.id, card, { costOverride: madness, fromZone: 'exile', onFail: () => p.graveyard.push(card) })) {
         this.log(`${p.name} casts ${card.name} for its madness cost (${madness}).`);
       } else {
         this.log(`${card.name} can't be cast for madness right now.`);
@@ -9010,6 +9083,20 @@ export class Game {
   declareAttackers(playerId, attackerIds, attackTargets = {}) {
     if (playerId !== this.active.id || this.step !== 'declareAttackers') return false;
     const p = this.getPlayer(playerId);
+    // Attack tax: pay for each creature attacking the player; attackers that
+    // can't be paid for don't attack (planeswalker attacks aren't taxed).
+    const tax = this.attackTaxPerCreature(this.opponentOf(playerId).id);
+    if (tax > 0) {
+      const atPlayer = attackerIds.filter(id => !attackTargets[id]);
+      let affordable = 0;
+      while (affordable < atPlayer.length && this.payableNow(playerId, `{${tax * (affordable + 1)}}`)) affordable++;
+      if (affordable < atPlayer.length) {
+        const dropped = new Set(atPlayer.slice(affordable));
+        attackerIds = attackerIds.filter(id => !dropped.has(id));
+        this.log(`${p.name} can only pay the attack tax for ${affordable} creature${affordable === 1 ? '' : 's'}.`);
+      }
+      if (affordable) { this.payNow(playerId, `{${tax * affordable}}`); this.log(`${p.name} pays {${tax * affordable}} to attack.`); }
+    }
     const opponent = this.opponentOf(playerId);
     const newAttackers = [];
     for (const id of attackerIds) {
@@ -9246,6 +9333,20 @@ export class Game {
     }
     // Combat damage to the monarch makes the attacker's controller the monarch.
     if (amount > 0 && this.monarch === defenderPlayer.id) this.becomeMonarch(attackerPerm.controllerId);
+    // Poisonous N: combat damage to a player gives N poison counters
+    // (printed, or granted: Snake Cult Initiation's "Enchanted creature has
+    // poisonous 3").
+    if (amount > 0) {
+      let poisonous = this.keywordAmount(attackerPerm.card, 'poisonous');
+      for (const pl of this.players) for (const a of pl.battlefield) {
+        const pm = a.attachedTo === attackerPerm.id && (a.card.oracleText || '').match(/(?:enchanted|equipped) creature has poisonous (\d+)/i);
+        if (pm) poisonous += parseInt(pm[1], 10);
+      }
+      if (poisonous > 0) {
+        defenderPlayer.counters.poison = (defenderPlayer.counters.poison || 0) + poisonous;
+        this.log(`Poisonous: ${defenderPlayer.name} gets ${poisonous} poison counter${poisonous > 1 ? 's' : ''} (${defenderPlayer.counters.poison}).`);
+      }
+    }
     // Toxic N: combat damage to a player also gives N poison counters.
     const toxic = this.keywordAmount(attackerPerm.card, 'toxic');
     if (toxic > 0) {

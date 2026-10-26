@@ -62,6 +62,14 @@ export async function buildDeckFromText(text) {
     throw new Error('None of the cards in that list could be found.');
   }
 
+  // Meld cards: fetch each melded result card once and attach it, so the
+  // engine can put it onto the battlefield when the pair melds.
+  const meldResults = [...new Set(deck.map(c => c.meld?.result).filter(r => r && !deck.some(d => d.name === r)))];
+  if (meldResults.length) {
+    const { cards: results } = await fetchCardsByName(meldResults);
+    for (const c of deck) if (c.meld?.result && results.get(c.meld.result)) c.meldResultCard = results.get(c.meld.result);
+  }
+
   return { deck, unresolved, cardCount: deck.length };
 }
 

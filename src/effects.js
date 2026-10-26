@@ -141,6 +141,8 @@ function buildCondition(t) {
     const n = num(m[1]); const L = { white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G', colorless: 'C' }[m[2]];
     return (g, c) => ((c.castInfo?.colors || c.sourcePerm?.castInfo?.colors || {})[L] || 0) >= n;
   }
+  // Storied
+  if (/^you have an enduring story$/.test(t)) return (g, c) => !!ctrl(g, c).enduringStory;
   // Eminence: "this creature is in the command zone or on the battlefield"
   // — true wherever the ability is being checked from.
   if (/^this creature is in the command zone or on the battlefield$/.test(t)) return () => true;
@@ -1296,6 +1298,18 @@ function interpretEffectText(text) {
         if (cond && cond !== 'no spells were cast last turn' && !(game.maxSpellsByOnePlayerLastTurn >= 2)) return;
         game.transformPermanent(ctx.sourcePerm);
       } });
+      continue;
+    }
+    // Meld: "if you both own and control this creature and a creature named
+    // X, exile them, then meld them into Y".
+    if ((m = clause.match(/^if you both own and control this (?:creature|permanent|land|artifact) and an? (?:creature|permanent|land|artifact) named (.+?), exile them, then meld them into (.+)$/))) {
+      const partner = m[1].trim(), result = m[2].trim();
+      steps.push({ kind: 'meld', targeting: 'none', resolve: (game, ctx) => game.meldPermanents(ctx.sourcePerm, partner, result) });
+      continue;
+    }
+    // Kamigawa flip cards: "flip this creature" / "flip it".
+    if (/^flip (?:this (?:creature|permanent|artifact|enchantment)|it)$/.test(clause)) {
+      steps.push({ kind: 'transform', targeting: 'none', resolve: (game, ctx) => game.transformPermanent(ctx.sourcePerm) });
       continue;
     }
     if (/^exile (?:this (?:saga|creature|permanent|enchantment|artifact)|it),? then return it to the battlefield transformed under (?:your|its owner's) control$/.test(clause)) {

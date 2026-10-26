@@ -47,6 +47,12 @@ export function normalize(raw) {
            (face.image_uris && face.image_uris.normal) || null,
     layout: raw.layout || 'normal',
     faces,
+    // Meld: this card's partner and the melded card's name (the melded card
+    // itself is fetched by deck.js when a deck has a meld pair).
+    meld: raw.layout === 'meld' && raw.all_parts ? {
+      result: raw.all_parts.find(p => p.component === 'meld_result')?.name || null,
+      parts: raw.all_parts.filter(p => p.component === 'meld_part').map(p => p.name),
+    } : null,
   };
 }
 

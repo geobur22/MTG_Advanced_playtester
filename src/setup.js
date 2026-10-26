@@ -195,6 +195,14 @@ async function runSetup({ watchMode }) {
       }
     }
 
+    if (companionA) {
+      const problems = checkCompanionCondition(companionA, mine.deck, { commanderMode });
+      if (problems.length) {
+        const proceed = await showConfirm(`Your deck doesn't meet ${companionA.name}'s companion condition:\n${problems.join('\n')}\n\nUse it as your companion anyway?`);
+        if (!proceed) { setButtonsBusy(false); return; }
+      }
+    }
+
     const cardsToAnalyze = [...mine.deck, ...theirs.deck];
     for (const c of [commanderA, commanderB, companionA].flat()) if (c) cardsToAnalyze.push(c);
     await analyzeDeck(cardsToAnalyze);
@@ -208,6 +216,29 @@ async function runSetup({ watchMode }) {
     showSetupError(err.message || 'Something went wrong loading that decklist.');
     setButtonsBusy(false);
   }
+}
+
+// Companion deckbuilding conditions (the ten Ikoria companions). Returns a
+// list of reasons the deck breaks the companion's condition (empty if it's
+// fine, or for a companion this doesn't know).
+export function checkCompanionCondition(companion, deck, { commanderMode = false } = {}) {
+  const text = (companion.oracleText || '').toLowerCase().replace(/ in your starting deck/g, '');
+  const nonland = deck.filter(c => !/\bland\b/i.test(c.typeLine || ''));
+  const permanents = deck.filter(c => /artifact|creature|enchantment|land|planeswalker|battle/i.test(c.typeLine || ''));
+  const names = (cards) => [...new Set(cards.map(c => c.name))].slice(0, 8).join(', ');
+  const bad = (cards, why) => (cards.length ? [`${why}: ${names(cards)}`] : []);
+  const pips = (c) => (c.manaCost || '').match(/\{[^}]+\}/g) || [];
+  if (/each permanent card has mana value 2 or less/.test(text)) return bad(permanents.filter(c => (c.cmc || 0) > 2), 'Permanent cards with mana value over 2'); // Lurrus
+  if (/each nonland card has mana value 3 or greater|contains only cards with mana value 3 or greater and land cards/.test(text)) return bad(nonland.filter(c => (c.cmc || 0) < 3), 'Nonland cards with mana value under 3'); // Keruga
+  if (/each nonland card has an odd mana value|contains only cards with odd mana values and land cards/.test(text)) return bad(nonland.filter(c => (c.cmc || 0) % 2 === 0), 'Nonland cards with even mana value'); // Obosh
+  if (/each card has an even mana value|contains only cards with even mana values/.test(text)) return bad(deck.filter(c => (c.cmc || 0) % 2 === 1), 'Cards with odd mana value'); // Gyruda
+  if (/no card has more than one of the same mana symbol/.test(text)) return bad(deck.filter(c => { const p = pips(c).filter(x => !/^\{\d+\}$/.test(x)); return new Set(p).size < p.length; }), 'Cards with a repeated mana symbol'); // Jegantha
+  if (/each creature card is a cat, elemental, nightmare, dinosaur, or beast/.test(text)) return bad(deck.filter(c => /creature/i.test(c.typeLine || '') && !/\b(cat|elemental|nightmare|dinosaur|beast)\b/i.test(c.typeLine || '')), 'Creatures outside Cat/Elemental/Nightmare/Dinosaur/Beast'); // Kaheera
+  if (/each nonland card has a different name/.test(text)) { const seen = new Map(); for (const c of nonland) seen.set(c.name, (seen.get(c.name) || 0) + 1); return bad(nonland.filter(c => seen.get(c.name) > 1), 'Nonland cards appearing more than once'); } // Lutri
+  if (/each nonland card shares a card type/.test(text)) { const types = ['artifact', 'creature', 'enchantment', 'instant', 'sorcery', 'planeswalker', 'battle']; const shared = types.filter(t => nonland.every(c => new RegExp(t, 'i').test(c.typeLine || ''))); return shared.length ? [] : ['Your nonland cards don\'t all share a card type']; } // Umori
+  if (/your starting deck contains at least twenty cards more than the minimum deck size|contains at least twenty cards more than the minimum deck size/.test(text)) { const min = commanderMode ? 99 : 60; return deck.length >= min + 20 ? [] : [`The deck needs at least ${min + 20} cards (it has ${deck.length})`]; } // Yorion
+  if (/each permanent card has an activated ability/.test(text)) return bad(permanents.filter(c => !/^[^\n]*:\s/m.test((c.oracleText || '').replace(/\([^()]*\)/g, '')) && !/\bland\b/i.test(c.typeLine || '')), 'Permanent cards without an activated ability'); // Zirda
+  return [];
 }
 
 // Commander deckbuilding legality (singleton + color identity) — checked
