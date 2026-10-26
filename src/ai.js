@@ -388,6 +388,9 @@ export function takeAITurnAction(game) {
     if (!p.landPlayedThisTurn) {
       const land = p.hand.find(c => isLand(game, c));
       if (land) { game.playLand(p.id, land.instanceId); return; }
+      // A modal double-faced card's land face (Pathways, the MDFC spell//land cycle).
+      const mdfc = p.hand.find(c => game.landFaces(c).length);
+      if (mdfc && game.playLandFace(p.id, mdfc.instanceId, game.landFaces(mdfc)[0].index)) return;
       // No land to play: a landcycler (Ash Barrens, the Plainscycling
       // cycle, ...) can go find one first, and the land drop then happens
       // on the very next action.
@@ -461,15 +464,17 @@ export function takeAITurnAction(game) {
         if (way.via === 'retrace' && myLands < 4) continue;
         if (way.via === 'jumpstart' && !game.discardFodder(p).some(c => isLand(game, c) && myLands >= 5)) continue;
         const viaEscape = way.via === 'escape';
-        const modal = game.getSpellModes(card);
+        // Disturb / Aftermath cast a different face — target with that face.
+        const castCard = way.face ? game.faceCard(card, way.face) : card;
+        const modal = game.getSpellModes(castCard);
         let modeIndexes = null;
         if (modal) {
-          modeIndexes = pickModesFor(game, modal, card, p.id);
+          modeIndexes = pickModesFor(game, modal, castCard, p.id);
           if (!modeIndexes) continue;
         }
-        const kinds = game.getRequiredTargetKinds(card, modeIndexes);
-        const targets = pickTargetsForKinds(game, card, p.id, kinds).filter(Boolean);
-        if (game.getMinRequiredTargetCount(card, modeIndexes) > targets.length) continue;
+        const kinds = game.getRequiredTargetKinds(castCard, modeIndexes);
+        const targets = pickTargetsForKinds(game, castCard, p.id, kinds).filter(Boolean);
+        if (game.getMinRequiredTargetCount(castCard, modeIndexes) > targets.length) continue;
         const result = game.castFromGraveyard(p.id, card.instanceId, { targets, modeIndexes, via: way.via, viaEscape });
         if (result.ok) return;
       }
@@ -514,6 +519,25 @@ export function takeAITurnAction(game) {
     // Storm spells go last, after everything else that can be cast this
     // turn has raised the count.
     const isStorm = (c) => /^(?:storm|gravestorm)\b/im.test((c.oracleText || '').replace(/\([^()]*\)/g, ''));
+    // Casting by face: an Adventure first whenever it has a use (the
+    // creature stays castable from exile afterward); otherwise a modal
+    // card's back face, a split card's other half (or both, fused), or a
+    // converted card — when the normal cast isn't available.
+    for (const card of p.hand) {
+      const opts = game.faceOptions(p.id, card).sort((a, b) => (b.kind === 'fuse') - (a.kind === 'fuse') || (b.card.cmc || 0) - (a.card.cmc || 0));
+      for (const opt of opts) {
+        if (opt.kind !== 'adventure' && opt.kind !== 'fuse' && castWays.has(card)) continue;
+        if (opt.kind === 'convert' && castWays.has(card)) continue;
+        const face = opt.card;
+        const modal = game.getSpellModes(face);
+        let modeIndexes = null;
+        if (modal) { modeIndexes = pickModesFor(game, modal, face, p.id); if (!modeIndexes) continue; }
+        const kinds = game.getRequiredTargetKinds(face, modeIndexes);
+        const targets = pickTargetsForKinds(game, face, p.id, kinds).filter(Boolean);
+        if (game.getMinRequiredTargetCount(face, modeIndexes) > targets.length) continue;
+        if (game.castFace(p.id, card.instanceId, opt.kind, targets, 0, modeIndexes).ok) return;
+      }
+    }
     const playable = [...castWays.keys()].sort((a, b) => (isStorm(a) - isStorm(b)) || ((b.cmc || 0) - (a.cmc || 0)));
     for (const card of playable) {
       const altCost = castWays.get(card).altCost;
@@ -633,6 +657,11 @@ export function takeAITurnAction(game) {
         const host = p.battlefield.filter(x => x.id !== perm.id && isCreature(game, x.card)).sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0];
         if (host && game.effectivePower(host) >= 3 && game.reconfigure(p.id, perm.id, host.id).ok) return;
       }
+    }
+
+    // Craft whenever possible (the back face is the payoff).
+    for (const perm of p.battlefield) {
+      if (game.getCraft(perm._dfcCard || perm.card) && game.canCraft(p.id, perm.id) && game.craft(p.id, perm.id).ok) return;
     }
 
     // Fortify: attach an unattached Fortification to a land.

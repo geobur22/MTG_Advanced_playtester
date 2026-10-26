@@ -995,6 +995,60 @@ function interpretEffectText(text) {
       continue;
     }
 
+    // Transforming: "transform this creature" / "convert it" / "exile this
+    // Saga, then return it to the battlefield transformed" / "it becomes
+    // night" — and old werewolves' "if no spells were cast last turn,
+    // transform this creature" (and the reverse).
+    if ((m = clause.match(/^(?:if (no spells were cast last turn|a player cast two or more spells last turn),?\s*)?(?:transform|convert) (?:this (?:creature|permanent|artifact|enchantment|land|saga|vehicle)|it)$/))) {
+      const cond = m[1] || null;
+      steps.push({ kind: 'transform', targeting: 'none', resolve: (game, ctx) => {
+        if (cond === 'no spells were cast last turn' && game.spellsCastLastTurn !== 0) return;
+        if (cond && cond !== 'no spells were cast last turn' && !(game.maxSpellsByOnePlayerLastTurn >= 2)) return;
+        game.transformPermanent(ctx.sourcePerm);
+      } });
+      continue;
+    }
+    if (/^exile (?:this (?:saga|creature|permanent|enchantment|artifact)|it),? then return it to the battlefield transformed under (?:your|its owner's) control$/.test(clause)) {
+      steps.push({ kind: 'transform', targeting: 'none', resolve: (game, ctx) => game.exileAndReturnTransformed(ctx.sourcePerm) });
+      continue;
+    }
+    if ((m = clause.match(/^it becomes (day|night)$/))) {
+      const when = m[1];
+      steps.push({ kind: 'dayNight', targeting: 'none', resolve: (game) => game.setDayNight(when) });
+      continue;
+    }
+
+    // Stat-filtered sweeps: "destroy all creatures with power 3 or greater"
+    // (Dusk) and "return all creature cards with power 2 or less from your
+    // graveyard to your hand / the battlefield" (Dawn).
+    if ((m = clause.match(/^destroy all creatures with (power|toughness|mana value) (\d+) or (greater|less)$/))) {
+      const stat = m[1], n = parseInt(m[2], 10), greater = m[3] === 'greater';
+      steps.push({ kind: 'destroy', targeting: 'none', resolve: (game, ctx) => {
+        const value = (perm) => stat === 'power' ? game.effectivePower(perm) : stat === 'toughness' ? game.effectiveToughness(perm) : (perm.card.cmc || 0);
+        for (const pl of game.players) for (const perm of [...pl.battlefield]) {
+          if (!game.isCreature(perm.card) || !game.findPermanent(perm.id)) continue;
+          if (greater ? value(perm) >= n : value(perm) <= n) game.applyDestroyEffect({ ...ctx, target: { type: 'permanent', id: perm.id }, targets: null });
+        }
+        game.checkStateBasedActions();
+      } });
+      continue;
+    }
+    if ((m = clause.match(/^return all creature cards with (power|mana value) (\d+) or less from your graveyard to (your hand|the battlefield)$/))) {
+      const stat = m[1], n = parseInt(m[2], 10), toHand = m[3] === 'your hand';
+      steps.push({ kind: 'regrowth', targeting: 'none', resolve: (game, ctx) => game.applyMassReturnFromGraveyard(ctx, stat, n, toHand) });
+      continue;
+    }
+
+    // Bolster N: N +1/+1 counters on your creature with the least toughness.
+    if ((m = clause.match(/^bolster (\d+|x|one|two|three|four)$/))) {
+      const amountToken = m[1];
+      steps.push({ kind: 'counters', targeting: 'none', resolve: (game, ctx) => {
+        const mine = game.getPlayer(ctx.controllerId).battlefield.filter(x => game.isCreature(x.card)).sort((a, b) => game.effectiveToughness(a) - game.effectiveToughness(b));
+        if (mine[0]) game.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: mine[0].id } }, resolveAmount(amountToken, ctx), '+1/+1');
+      } });
+      continue;
+    }
+
     // "Two target players each draw a card" (Huddle Up).
     if ((m = clause.match(/^(two|three) target players each draw (a|an|one|two|three|\d+) cards?$/))) {
       const count = parseAmount(m[1]), amount = parseAmount(m[2]);
@@ -4130,6 +4184,11 @@ export function getGraveyardCastCosts(card) {
   // the cost by its power; exiled afterward.
   const harmonize = text.match(/^harmonize ((?:\{[^}]+\})+)/im);
   if (harmonize) out.push({ via: 'harmonize', manaCost: harmonize[1], tapReduce: true });
+  // Disturb: the back face from the graveyard. Aftermath: a split card's
+  // second half, only from the graveyard. (`face` is the face to cast.)
+  const disturb = text.match(/^disturb ((?:\{[^}]+\})+)/im);
+  if (disturb && card.faces?.[1]) out.push({ via: 'disturb', manaCost: disturb[1], face: 1 });
+  if (card.faces?.[1] && /^aftermath\b/im.test(card.faces[1].oracleText || '')) out.push({ via: 'aftermath', manaCost: card.faces[1].manaCost, face: 1 });
   const mayhem = text.match(/^mayhem ((?:\{[^}]+\})+)/im);
   if (mayhem) out.push({ via: 'mayhem', manaCost: mayhem[1], needsDiscardedThisTurn: true });
   return out;
@@ -4287,6 +4346,15 @@ export function getDevotionRequirement(card) {
   const m = plainText(card).match(/as long as your devotion to (white|blue|black|red|green)(?: and (white|blue|black|red|green))? is less than (\w+), [^.]+ isn't a creature/i);
   if (!m) return null;
   return { colors: [COLOR[m[1].toLowerCase()], m[2] && COLOR[m[2].toLowerCase()]].filter(Boolean), need: parseAmount(m[3].toLowerCase()) };
+}
+
+// Batch 12 readers.
+// "More Than Meets the Eye {2}{R}" — cast it converted (back face) for that.
+export function getConvertCost(card) { return lineCost(card, 'more than meets the eye'); }
+// "Craft with artifact {3}{W}" — { material, manaCost } or null.
+export function getCraft(card) {
+  const m = plainText(card).match(/^craft with (.+?) ((?:\{[^}]+\})+)/im);
+  return m ? { material: m[1].trim().toLowerCase(), manaCost: m[2] } : null;
 }
 
 // Optional costs paid as a spell is cast (batch 4b). Each returns null when

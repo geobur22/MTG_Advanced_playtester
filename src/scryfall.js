@@ -7,24 +7,46 @@ const CACHE = new Map(); // name (lowercased) -> normalized card
 // hits /cards/search rather than /cards/collection) can reuse the exact same
 // normalization instead of re-implementing double-faced-card handling.
 export function normalize(raw) {
-  // Double-faced cards store power/toughness/oracle text on card_faces.
-  const face = raw.card_faces && raw.card_faces.length ? raw.card_faces[0] : raw;
+  // Multi-face cards (transforming and modal double-faced cards, split,
+  // adventure, and flip cards) store each face's cost, types, text, and
+  // stats on card_faces. The card itself shows its FRONT face (the combined
+  // "Sorcery // Land" type line made a modal card's spell side count as a
+  // land, and a split card's combined cost charged both halves); every
+  // face is kept on `faces` for the engine to cast, play, or transform into.
+  const rawFaces = raw.card_faces && raw.card_faces.length ? raw.card_faces : null;
+  const face = rawFaces ? rawFaces[0] : raw;
+  const faces = rawFaces ? rawFaces.map(f => ({
+    name: f.name,
+    manaCost: f.mana_cost || '',
+    typeLine: f.type_line || '',
+    oracleText: f.oracle_text || '',
+    power: f.power ?? null,
+    toughness: f.toughness ?? null,
+    loyalty: f.loyalty ?? null,
+    colors: f.colors || raw.colors || [],
+    image: (f.image_uris && f.image_uris.normal) || null,
+  })) : null;
+  const allKeywords = (raw.keywords || []).map(k => k.toLowerCase());
+  const frontText = (face.oracle_text || raw.oracle_text || '').toLowerCase();
   return {
     id: raw.id,
     name: raw.name,
     manaCost: face.mana_cost || raw.mana_cost || '',
     cmc: raw.cmc || 0,
-    typeLine: raw.type_line || '',
+    typeLine: rawFaces ? (face.type_line || raw.type_line || '') : (raw.type_line || ''),
     oracleText: face.oracle_text || raw.oracle_text || '',
     power: face.power ?? raw.power ?? null,
     toughness: face.toughness ?? raw.toughness ?? null,
-    colors: raw.colors || face.colors || [],
+    colors: rawFaces ? (face.colors || raw.colors || []) : (raw.colors || []),
     colorIdentity: raw.color_identity || [],
-    keywords: (raw.keywords || []).map(k => k.toLowerCase()),
-    loyalty: raw.loyalty ?? face.loyalty ?? null,
+    // A multi-face card's keyword list covers every face; keep the front's.
+    keywords: rawFaces ? allKeywords.filter(k => frontText.includes(k)) : allKeywords,
+    loyalty: face.loyalty ?? raw.loyalty ?? null,
     producedMana: raw.produced_mana || null,
     image: (raw.image_uris && raw.image_uris.normal) ||
            (face.image_uris && face.image_uris.normal) || null,
+    layout: raw.layout || 'normal',
+    faces,
   };
 }
 

@@ -360,14 +360,14 @@ function renderGraveyardView() {
     // (Also Jump-start, Retrace, and Mayhem — one button per way it can be
     // cast from here right now.)
     if (player.id === HUMAN_ID && !watchMode) {
-      const LABEL = { flashback: 'Flashback', escape: 'Escape', jumpstart: 'Jump-start', retrace: 'Retrace', mayhem: 'Mayhem', harmonize: 'Harmonize' };
+      const LABEL = { flashback: 'Flashback', escape: 'Escape', jumpstart: 'Jump-start', retrace: 'Retrace', mayhem: 'Mayhem', harmonize: 'Harmonize', disturb: 'Disturb', aftermath: 'Aftermath' };
       for (const way of game.getGraveyardCastWays(HUMAN_ID, card.instanceId)) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'action-button primary graveyard-activate-button';
         const extra = way.exileCount ? ` (exile ${way.exileCount})` : way.discard === 'land' ? ' + discard a land' : way.discard ? ' + discard a card' : '';
         btn.textContent = `${LABEL[way.via]} ${way.manaCost}${extra}`;
-        btn.addEventListener('click', () => handleGraveyardCastClick(card, { via: way.via, discard: way.discard }));
+        btn.addEventListener('click', () => handleGraveyardCastClick(card, { via: way.via, discard: way.discard, face: way.face }));
         div.appendChild(btn);
       }
     }
@@ -381,7 +381,7 @@ function renderGraveyardView() {
 // Neither mechanic here supports an {X} cost or Kicker on top (no real
 // card combines them), so unlike handleHandCardClick there's no X/kicker
 // prompt to add.
-async function handleGraveyardCastClick(card, { via, discard = null }) {
+async function handleGraveyardCastClick(card, { via, discard = null, face = null }) {
   if (game.gameOver || watchMode) return;
   if (ui.abilityChoice || ui.equipChoice || ui.ninjutsuChoice || ui.targeting || game.pendingRequest) return;
   if (!game.canCastFromGraveyard(HUMAN_ID, card.instanceId, { via })) return;
@@ -395,14 +395,16 @@ async function handleGraveyardCastClick(card, { via, discard = null }) {
     discardId = pick.instanceId;
   }
 
-  const modal = game.getSpellModes(card);
+  // Disturb / Aftermath: modes and targets come from the face being cast.
+  const castCard = face ? game.faceCard(card, face) : card;
+  const modal = game.getSpellModes(castCard);
   let modeIndexes = null;
   if (modal) {
-    modeIndexes = await chooseModes(card, modal);
+    modeIndexes = await chooseModes(castCard, modal);
     if (modeIndexes === null) return;
   }
 
-  const kinds = game.getRequiredTargetKinds(card, modeIndexes);
+  const kinds = game.getRequiredTargetKinds(castCard, modeIndexes);
   if (kinds.length === 0) {
     const result = game.castFromGraveyard(HUMAN_ID, card.instanceId, { modeIndexes, via, viaEscape, discardId });
     if (!result.ok) await showAlert(result.reason);
@@ -984,6 +986,7 @@ function renderHand(human) {
     badge.textContent = entry.kind === 'foretell' ? `Foretold — cast for ${entry.costOverride}${laterTurn}`
       : entry.kind === 'plot' ? `Plotted — cast free at sorcery speed${laterTurn}`
       : entry.kind === 'warp' ? `Warped — cast from exile${laterTurn}`
+      : entry.kind === 'adventure' ? `On an adventure — cast ${entry.card.faces?.[0]?.name || entry.card.name}`
       : `Exiled — ${entry.remainingOwnTurns} of your turn${entry.remainingOwnTurns === 1 ? '' : 's'} left`;
     div.appendChild(badge);
     div.addEventListener('click', () => handleExiledCardClick(entry));
@@ -1285,6 +1288,14 @@ function handCardAlternatives(card) {
       options.push({ label: opt.label, execute: () => handleHandCardClick(card, { skipCycleChoice: true, altCost: { kind: opt.kind, emergeVictimId: opt.emergeVictimId, mutateTargetId: opt.mutateTargetId } }) });
     }
   }
+  // Casting or playing another face: Adventure, a modal card's back, a
+  // split card's other half (or Fuse), More Than Meets the Eye, land faces.
+  for (const opt of game.faceOptions(HUMAN_ID, card)) {
+    options.push({ label: opt.label, execute: () => handleHandCardClick(card, { skipCycleChoice: true, face: opt.kind }) });
+  }
+  if (game.canPlayLand(HUMAN_ID)) {
+    for (const lf of game.landFaces(card)) options.push({ label: `Play ${lf.name}`, execute: () => game.playLandFace(HUMAN_ID, card.instanceId, lf.index) });
+  }
   const faceDown = game.getFaceDownCost(card);
   if (faceDown && game.canCastFaceDown(HUMAN_ID, card.instanceId)) {
     options.push({ label: `Cast face down as a 2/2 for {3} (${faceDown.kind} ${faceDown.cost} to turn up)`, execute: () => { const r = game.castFaceDown(HUMAN_ID, card.instanceId); if (!r.ok) showAlert(r.reason); } });
@@ -1317,7 +1328,7 @@ function handCardAlternatives(card) {
   return options;
 }
 
-async function handleHandCardClick(card, { skipCycleChoice = false, altCost = null } = {}) {
+async function handleHandCardClick(card, { skipCycleChoice = false, altCost = null, face = null } = {}) {
   if (game.gameOver || watchMode) return;
   if (ui.abilityChoice || ui.equipChoice) return; // must Cancel or pick first
 
@@ -1382,7 +1393,9 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
     return;
   }
 
-  if (!altCost && !isHandCardPlayable(card)) return;
+  // Casting a different face: work with that face from here on.
+  if (face) card = game.faceForCast(card, face);
+  if (!altCost && !face && !isHandCardPlayable(card)) return;
 
   const modal = game.getSpellModes(card);
   let modeIndexes = null;
@@ -1438,12 +1451,13 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
   }
 
   if (kinds.length === 0) {
-    const result = game.castSpell(HUMAN_ID, card.instanceId, [], xValue, modeIndexes, kicked, { ...(altCost ? { altCost } : {}), extras });
+    const opts = { ...(altCost ? { altCost } : {}), extras };
+    const result = face ? game.castFace(HUMAN_ID, card.instanceId, face, [], xValue, modeIndexes, kicked, opts) : game.castSpell(HUMAN_ID, card.instanceId, [], xValue, modeIndexes, kicked, opts);
     if (!result.ok) await showAlert(result.reason);
     return;
   }
 
-  ui.targeting = { card, kinds, collected: [], xValue, modeIndexes, kicked, altCost, extras };
+  ui.targeting = { card, kinds, collected: [], xValue, modeIndexes, kicked, altCost, extras, face };
   render();
 }
 
@@ -1675,7 +1689,8 @@ function handleTargetPick(target) {
       else if (t.fromExile) game.playCardFromExile(HUMAN_ID, t.fromExile, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null });
       else if (t.fromGraveyard) game.castFromGraveyard(HUMAN_ID, t.fromGraveyard.cardInstanceId, { targets: t.collected, xValue: t.xValue || 0, modeIndexes: t.modeIndexes || null, viaEscape: t.fromGraveyard.viaEscape, via: t.fromGraveyard.via, discardId: t.fromGraveyard.discardId });
       else {
-        const result = game.castSpell(HUMAN_ID, t.card.instanceId, t.collected, t.xValue || 0, t.modeIndexes || null, t.kicked || false, { ...(t.altCost ? { altCost: t.altCost } : {}), extras: t.extras || {} });
+        const opts = { ...(t.altCost ? { altCost: t.altCost } : {}), extras: t.extras || {} };
+        const result = t.face ? game.castFace(HUMAN_ID, t.card.instanceId, t.face, t.collected, t.xValue || 0, t.modeIndexes || null, t.kicked || false, opts) : game.castSpell(HUMAN_ID, t.card.instanceId, t.collected, t.xValue || 0, t.modeIndexes || null, t.kicked || false, opts);
         if (!result.ok) showAlert(result.reason);
       }
     } else {
@@ -1724,6 +1739,11 @@ function getAvailableActionsForPermanent(perm) {
       actions.push({ label: ability.effectText, execute: () => activateNonTapAbilityAtIndex(perm, i) });
     }
   });
+
+  if (game.canCraft(HUMAN_ID, perm.id)) {
+    const info = game.getCraft(perm._dfcCard || perm.card);
+    actions.push({ label: `Craft with ${info.material} (${info.manaCost})`, execute: () => { const r = game.craft(HUMAN_ID, perm.id); if (!r.ok) showAlert(r.reason); } });
+  }
 
   // Vehicles, Mounts, Spacecraft, Reconfigure Equipment.
   if (game.canCrew(HUMAN_ID, perm.id)) actions.push({ label: `Crew ${game.keywordAmount(perm.card, 'crew')}`, execute: () => { const r = game.crew(HUMAN_ID, perm.id); if (!r.ok) showAlert(r.reason); } });

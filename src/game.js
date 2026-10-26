@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending, getReconfigureCost, hasLivingWeapon, hasLivingMetal, hasStation, getStationInfo, getDevotionRequirement } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending, getReconfigureCost, hasLivingWeapon, hasLivingMetal, hasStation, getStationInfo, getDevotionRequirement, getConvertCost, getCraft } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -43,6 +43,28 @@ function hasTypeWord(card, word) {
 // A type line with "Creature" added or removed ("Artifact — Vehicle" →
 // "Artifact Creature — Vehicle"), optionally adding a subtype.
 const CARD_STATE_MEMO = new WeakMap();
+
+// One face of a multi-face card as a card of its own (same instanceId), with
+// the printed card kept on _dfcOriginal so it can go back to its zone whole.
+function faceCard(card, idx) {
+  const f = card.faces?.[idx];
+  if (!f) return null;
+  return {
+    ...card, name: f.name, manaCost: f.manaCost, cmc: totalCmc(parseManaCost(f.manaCost || '')),
+    typeLine: f.typeLine, oracleText: f.oracleText, power: f.power, toughness: f.toughness, loyalty: f.loyalty,
+    colors: f.colors, image: f.image || card.image, keywords: extractKnownKeywords((f.oracleText || '').toLowerCase()),
+    faceIndex: idx, _dfcOriginal: card,
+  };
+}
+
+// Both halves of a Fuse split card cast together.
+function fusedCard(card) {
+  const [a, b] = card.faces;
+  return {
+    ...card, name: card.name, manaCost: `${a.manaCost}${b.manaCost}`, cmc: totalCmc(parseManaCost(`${a.manaCost}${b.manaCost}`)),
+    typeLine: a.typeLine, oracleText: `${a.oracleText}\n${b.oracleText}`, keywords: [], faceIndex: 'fuse', _dfcOriginal: card,
+  };
+}
 function withCreatureType(typeLine, creature, subtype = null) {
   let [types, subs = ''] = (typeLine || '').split('—').map(x => x.trim());
   if (creature && !/\bcreature\b/i.test(types)) types = `${types} Creature`;
@@ -574,7 +596,7 @@ export class Game {
   static SNAPSHOT_FIELDS = [
     'players', 'stack', 'activePlayerIndex', 'priorityPlayerIndex', 'consecutivePasses',
     'stepIndex', 'turnNumber', 'logLines', 'gameOver', 'winner', 'pendingRequest',
-    '_firstTurn', 'mulligans', '_actionsSinceLastPass', 'pendingExtraCombats', 'leftBattlefieldThisTurn', 'monarch', 'monarchExiles',
+    '_firstTurn', 'mulligans', '_actionsSinceLastPass', 'pendingExtraCombats', 'leftBattlefieldThisTurn', 'monarch', 'monarchExiles', 'dayNight', 'spellsCastLastTurn', 'maxSpellsByOnePlayerLastTurn',
     'controlChanges',
   ];
 
@@ -1242,6 +1264,8 @@ export class Game {
         perm.activatedLoyaltyAbilityThisTurn = false;
       }
       this.active.landPlayedThisTurn = false;
+      // Day/night moves on from what happened last turn (before it's reset).
+      this.advanceDayNight(this.opponentOf(this.active.id));
       // "This turn" is a shared, global concept (only one turn happens at a
       // time) — a new turn beginning resets it for BOTH players, not just
       // whoever's turn it now is.
@@ -2440,6 +2464,7 @@ export class Game {
     this.stack = this.stack.filter(s => s.id !== stackItem.id);
     if (stackItem.isCopy) return;
     if (stackItem.faceDown) stackItem.card = stackItem.faceDown.card;
+    if (stackItem.card._dfcOriginal) stackItem.card = stackItem.card._dfcOriginal;
     // The card's real owner (see castSpell's own `ownerId` option/comment)
     // — almost always the same as the caster, but not for a card like
     // Etali, Primal Storm's own attack trigger casts someone else's.
@@ -2742,6 +2767,8 @@ export class Game {
     if (item.isPermanentSpell) {
       const perm = makePermanent(card, controllerId);
       if (item.faceDown) perm.faceDown = item.faceDown;
+      if (card._dfcOriginal) perm._dfcCard = card._dfcOriginal;
+      perm.disturbed = item.graveyardVia === 'disturb';
       perm.wasBargained = !!item.bargained;
       perm.giftPromised = !!item.gift;
       perm.squadCount = item.squadCount || 0;
@@ -2918,16 +2945,26 @@ export class Game {
       this.checkStateBasedActions();
       return;
     }
+    // The printed card (not just the cast face) goes to the zone.
+    const zoneCard = card._dfcOriginal || card;
+    // Adventure: the card goes on an adventure — exiled, castable later as
+    // its creature face.
+    if (item.faceKind === 'adventure') {
+      p.exiledPlayable.push({ id: uid('exile'), card: zoneCard, remainingOwnTurns: Infinity, kind: 'adventure' });
+      this.log(`${zoneCard.name} goes on an adventure (exiled; it can be cast as ${zoneCard.faces[0].name} later).`);
+      this.checkStateBasedActions();
+      return;
+    }
     // Flashback and Escape both exile an instant/sorcery as it resolves
     // instead of putting it into the graveyard as usual (Flashback's own
     // "then exile it"; Escape's identical real-rules behavior for
     // non-permanent cards) — see castFromGraveyard.
     if (item.viaFlashback || item.viaEscape) {
-      p.exile.push(card);
+      p.exile.push(zoneCard);
       this.log(`${card.name} is exiled instead of returning to the graveyard (cast from the graveyard).`);
     } else if (hasParadigm(card)) {
       // Paradigm: exiled; a free copy can be cast each first main phase.
-      p.exile.push(card);
+      p.exile.push(zoneCard);
       if (!(p.paradigms ||= []).some(c => c.name === card.name)) p.paradigms.push(card);
       this.log(`${card.name} is exiled (paradigm) — ${p.name} may cast a copy at the start of each first main phase.`);
     } else if (hasRebound(card) && item.fromZone === 'hand' && !item.viaRebound) {
@@ -2941,21 +2978,21 @@ export class Game {
       // it was cast FROM (an opponent's graveyard), not this spell's
       // CASTER (item.controllerId, who's just borrowing it), so this goes
       // to a different player's exile than the `p.exile` case above.
-      this.getPlayer(item.exileToOwnerId).exile.push(card);
+      this.getPlayer(item.exileToOwnerId).exile.push(zoneCard);
       this.log(`${card.name} is exiled instead of returning to its owner's graveyard.`);
     } else if (item.buyback) {
       // Buyback paid: "put this card into your hand as it resolves." Only on
       // RESOLUTION — a countered buyback spell still goes to the graveyard
       // (that path never reaches here), and the cast-from-graveyard exile
       // replacements above win, same as real rules.
-      this.getPlayer(item.ownerId || controllerId).hand.push(card);
+      this.getPlayer(item.ownerId || controllerId).hand.push(zoneCard);
       this.log(`${card.name} returns to its owner's hand (buyback).`);
     } else {
       // Normally the caster's own graveyard, EXCEPT when the card's real
       // owner is someone else (Etali, Primal Storm casting an opponent's
       // exiled card, with no "exile it instead" text of its own) — see
       // castSpell's own `ownerId` option/comment.
-      this.getPlayer(item.ownerId || controllerId).graveyard.push(card);
+      this.getPlayer(item.ownerId || controllerId).graveyard.push(zoneCard);
     }
     this.checkStateBasedActions();
   }
@@ -3150,6 +3187,10 @@ export class Game {
   // creature for a payoff), and Evolve on OTHER creatures you control.
   triggerEntryKeywords(perm) {
     this.applyHideaway(perm);
+    if (/^(?:daybound|nightbound)\b/im.test((perm.card.oracleText || '').replace(/\([^()]*\)/g, ''))) {
+      if (!this.dayNight) this.setDayNight('day');
+      else this.syncDayNightFaces();
+    }
     if (hasForMirrodin(perm.card)) {
       // For Mirrodin!: a 2/2 red Rebel token, then attach this to it.
       const p = this.getPlayer(perm.controllerId);
@@ -3827,6 +3868,187 @@ export class Game {
       }
     }
   }
+
+  // "Return all creature cards with power N or less from your graveyard to
+  // your hand / the battlefield".
+  applyMassReturnFromGraveyard(ctx, stat, n, toHand) {
+    const p = this.getPlayer(ctx.controllerId);
+    const picks = p.graveyard.filter(c => isCreature(c) && (stat === 'power' ? (parseInt(c.power, 10) || 0) : (c.cmc || 0)) <= n);
+    for (const c of picks) {
+      p.graveyard.splice(p.graveyard.indexOf(c), 1);
+      if (toHand) p.hand.push(c);
+      else { const perm = makePermanent(c, p.id); p.battlefield.push(perm); this.triggerETB(perm); }
+    }
+    if (picks.length) this.log(`${ctx.card.name} returns ${picks.map(c => c.name).join(', ')} to ${toHand ? 'hand' : 'the battlefield'}.`);
+    this.checkStateBasedActions();
+  }
+
+  // ---------- Batch 12: double-faced, split, and adventure cards ----------
+  faceCard(card, idx) { return faceCard(card, idx); }
+
+  // Other ways to cast a hand card by one of its faces: an Adventure, a
+  // modal double-faced card's back (nonland) face, a split card's right
+  // half (or both, with Fuse), or a More Than Meets the Eye card converted.
+  // [{ kind, label, card }] — only those castable right now.
+  faceOptions(playerId, card) {
+    if (!card.faces?.[1]) return [];
+    const out = [];
+    const back = card.faces[1];
+    const add = (kind, label, clone) => { if (clone && this.canCastSpell(playerId, clone) && this.affordability(playerId, clone)) out.push({ kind, label, card: clone }); };
+    if (card.layout === 'adventure') add('adventure', `Adventure: ${back.name} (${back.manaCost})`, faceCard(card, 1));
+    if (card.layout === 'modal_dfc' && !/\bland\b/i.test(back.typeLine)) add('backFace', `Cast ${back.name} (${back.manaCost})`, faceCard(card, 1));
+    if (card.layout === 'split' && !/^aftermath\b/im.test(back.oracleText)) {
+      add('splitRight', `Cast ${back.name} (${back.manaCost})`, faceCard(card, 1));
+      if (/^fuse\b/im.test(card.faces[0].oracleText) && /^fuse\b/im.test(back.oracleText)) add('fuse', `Fuse: cast both halves (${card.faces[0].manaCost}${back.manaCost})`, fusedCard(card));
+    }
+    const convert = getConvertCost(card);
+    if (convert) add('convert', `Cast ${back.name} converted (${convert})`, { ...faceCard(card, 1), manaCost: convert, cmc: totalCmc(parseManaCost(convert)) });
+    return out;
+  }
+
+  faceForCast(card, kind) {
+    return this.faceOptions(this.priorityPlayer.id, card).find(o => o.kind === kind)?.card
+      || (kind === 'fuse' ? fusedCard(card) : faceCard(card, 1));
+  }
+
+  // Cast a hand card by one of its faces: the face (with the card's own
+  // instanceId) temporarily stands in for it in hand, then castSpell runs
+  // as usual. The real card goes wherever the face would.
+  castFace(playerId, instanceId, kind, targets = [], xValue = 0, modeIndexes = null, kicked = false, opts = {}) {
+    const p = this.getPlayer(playerId);
+    const idx = p.hand.findIndex(c => c.instanceId === instanceId);
+    if (idx === -1) return { ok: false, reason: 'Card not in hand.' };
+    const real = p.hand[idx];
+    const option = this.faceOptions(playerId, real).find(o => o.kind === kind);
+    if (!option) return { ok: false, reason: "Can't cast that face right now." };
+    p.hand.splice(idx, 1, option.card);
+    const result = this.castSpell(playerId, instanceId, targets, xValue, modeIndexes, kicked, opts);
+    if (!result.ok) {
+      const i = p.hand.indexOf(option.card);
+      if (i !== -1) p.hand.splice(i, 1, real);
+      return result;
+    }
+    const item = this.stack.find(x => x.card === option.card);
+    if (item) item.faceKind = kind;
+    return result;
+  }
+
+  // A modal double-faced card's land face (either side) played as a land.
+  landFaces(card) {
+    if (card.layout !== 'modal_dfc' || !card.faces) return [];
+    return card.faces.map((f, i) => ({ f, i })).filter(({ f }) => /\bland\b/i.test(f.typeLine)).map(({ f, i }) => ({ index: i, name: f.name }));
+  }
+
+  playLandFace(playerId, instanceId, faceIndex) {
+    if (!this.canPlayLand(playerId)) return false;
+    const p = this.getPlayer(playerId);
+    const idx = p.hand.findIndex(c => c.instanceId === instanceId);
+    if (idx === -1) return false;
+    const real = p.hand[idx];
+    const clone = faceIndex === 0 ? null : faceCard(real, faceIndex);
+    if (clone) p.hand.splice(idx, 1, clone);
+    const ok = this.playLand(playerId, instanceId);
+    if (!ok && clone) { const i = p.hand.indexOf(clone); if (i !== -1) p.hand.splice(i, 1, real); }
+    return ok;
+  }
+
+  // Transform / convert: flip to the other face (the printed card is kept
+  // in perm._dfcCard for whatever zone it goes to later).
+  transformPermanent(perm) {
+    if (!perm || !this.findPermanent(perm.id)) return;
+    if (perm._baseCard) { perm.card = perm._baseCard; delete perm._baseCard; }
+    const original = perm._dfcCard || perm.card;
+    if (!original.faces?.[1] || original.layout === 'adventure' || original.layout === 'split') return;
+    const toBack = (perm.card.faceIndex ?? 0) === 0;
+    if (toBack) { perm._dfcCard = original; perm.card = faceCard(original, 1); }
+    else { perm.card = original; delete perm._dfcCard; }
+    this.log(`${original.faces[toBack ? 0 : 1].name} transforms into ${perm.card.name}.`);
+    this.refreshCardState(perm);
+    this.checkStateBasedActions();
+  }
+
+  // "Exile this Saga, then return it to the battlefield transformed"
+  // (Fable of the Mirror-Breaker): a new object enters as its back face.
+  exileAndReturnTransformed(perm) {
+    if (!perm || !this.findPermanent(perm.id)) return;
+    const p = this.getPlayer(perm.controllerId);
+    p.battlefield = p.battlefield.filter(x => x.id !== perm.id);
+    this.detachFromLeavingBattlefield(perm);
+    this.triggerLeavesBattlefield(perm);
+    const original = perm.card;
+    if (!original.faces?.[1]) { this.getPlayer(perm.ownerId).exile.push(original); return; }
+    const back = makePermanent(faceCard(original, 1), perm.ownerId);
+    back._dfcCard = original;
+    this.getPlayer(perm.ownerId).battlefield.push(back);
+    this.log(`${original.faces[0].name} returns transformed as ${back.card.name}.`);
+    this.checkStateBasedActions();
+    this.triggerETB(back);
+  }
+
+  // Day / night (Daybound / Nightbound). It becomes day when a daybound
+  // permanent appears and it's neither; each turn it flips to night if the
+  // previous turn's active player cast no spells, or back to day if a
+  // player cast two or more. Daybound faces show by day, nightbound by night.
+  setDayNight(value) {
+    if (this.dayNight === value) return;
+    this.dayNight = value;
+    this.log(`It becomes ${value}.`);
+    this.syncDayNightFaces();
+  }
+
+  syncDayNightFaces() {
+    for (const pl of this.players) for (const perm of [...pl.battlefield]) {
+      const text = (perm.card.oracleText || '').replace(/\([^()]*\)/g, '');
+      if ((this.dayNight === 'night' && /^daybound\b/im.test(text)) || (this.dayNight === 'day' && /^nightbound\b/im.test(text))) this.transformPermanent(perm);
+    }
+  }
+
+  advanceDayNight(prevActive) {
+    this.spellsCastLastTurn = this.totalSpellsThisTurn();
+    this.maxSpellsByOnePlayerLastTurn = Math.max(0, ...this.players.map(p => p.spellsCastThisTurn || 0));
+    if (this.dayNight === 'day' && prevActive && (prevActive.spellsCastThisTurn || 0) === 0) this.setDayNight('night');
+    else if (this.dayNight === 'night' && this.maxSpellsByOnePlayerLastTurn >= 2) this.setDayNight('day');
+  }
+
+  // Craft with [material] {cost}: exile this and a matching permanent you
+  // control or card in your graveyard; return it transformed. Sorcery
+  // speed. The AI uses its least valuable material.
+  craftMaterial(playerId, perm) {
+    const info = getCraft(perm._dfcCard || perm.card);
+    if (!info) return null;
+    const word = info.material.replace(/^(?:one or more|two or more|three or more|an?|other)\s+/, '').replace(/s$/, '');
+    const matches = (c) => word === 'artifact' ? isArtifact(c) : word === 'creature' ? isCreature(c) : word === 'land' ? isLand(c) : hasTypeWord(c, word);
+    const p = this.getPlayer(playerId);
+    const fromBf = p.battlefield.filter(x => x.id !== perm.id && matches(x.card)).sort((a, b) => (isTokenCard(b.card) - isTokenCard(a.card)) || (a.card.cmc || 0) - (b.card.cmc || 0))[0];
+    const fromGy = p.graveyard.filter(matches).sort((a, b) => (a.cmc || 0) - (b.cmc || 0))[0];
+    return fromGy ? { card: fromGy } : fromBf ? { perm: fromBf } : null;
+  }
+
+  canCraft(playerId, permId) {
+    const perm = this.findPermanent(permId);
+    if (!perm || perm.controllerId !== playerId || this.gameOver || this.pendingRequest || this.splitSecondActive()) return false;
+    const info = getCraft(perm._dfcCard || perm.card);
+    if (!info || !(perm._dfcCard || perm.card).faces?.[1]) return false;
+    if (!(this.active.id === playerId && this.priorityPlayer.id === playerId && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    return !!this.craftMaterial(playerId, perm) && this.payableNow(playerId, info.manaCost);
+  }
+
+  craft(playerId, permId) {
+    if (!this.canCraft(playerId, permId)) return { ok: false, reason: "Can't craft right now." };
+    const perm = this.findPermanent(permId);
+    const p = this.getPlayer(playerId);
+    const info = getCraft(perm._dfcCard || perm.card);
+    const material = this.craftMaterial(playerId, perm);
+    this.payNow(playerId, info.manaCost);
+    if (material.card) { p.graveyard.splice(p.graveyard.indexOf(material.card), 1); p.exile.push(material.card); }
+    else this.applyExileEffect({ controllerId: playerId, card: perm.card, target: { type: 'permanent', id: material.perm.id } });
+    this.log(`${p.name} crafts ${perm.card.name} with ${(material.card || material.perm.card).name}.`);
+    this.exileAndReturnTransformed(perm);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  getCraft(card) { return getCraft(card); }
 
   // ---------- Batch 11: permanents that become (or stop being) creatures ----------
   // A permanent's current card is derived from its original (perm._baseCard)
@@ -5591,6 +5813,7 @@ export class Game {
     }
     const countered = this.stack.splice(idx, 1)[0];
     if (countered.faceDown) countered.card = countered.faceDown.card;
+    if (countered.card._dfcOriginal) countered.card = countered.card._dfcOriginal;
     const owner = this.getPlayer(countered.controllerId);
     // A countered COMMANDER spell goes back to the command zone, not the
     // graveyard, same "commander replacement effect" already applied
@@ -6814,7 +7037,7 @@ export class Game {
     let manaCost = way.manaCost;
     const helper = way.tapReduce ? this.harmonizeHelper(p) : null;
     if (helper) manaCost = subtractManaCost(way.manaCost, `{${helper.power}}`);
-    const overridden = { ...original, manaCost };
+    const overridden = way.face ? { ...faceCard(original, way.face), manaCost } : { ...original, manaCost };
     p.graveyard.splice(idx, 1);
     p.hand.push(overridden);
     const result = this.castSpell(playerId, overridden.instanceId, targets, xValue, modeIndexes, false, { fromZone: 'graveyard' });
@@ -6824,7 +7047,7 @@ export class Game {
       p.graveyard.splice(idx, 0, original);
       return result;
     }
-    overridden.manaCost = originalManaCost;
+    if (!way.face) overridden.manaCost = originalManaCost;
     if (kind === 'escape') {
       for (let i = 0; i < way.exileCount && p.graveyard.length > 0; i++) p.exile.push(p.graveyard.shift());
       this.log(`${p.name} exiles ${way.exileCount} other card${way.exileCount === 1 ? '' : 's'} from their graveyard to pay Escape.`);
@@ -6836,7 +7059,7 @@ export class Game {
     }
     const stackItem = this.stack.find(item => item.card === overridden);
     if (stackItem) {
-      stackItem.viaFlashback = kind === 'flashback' || kind === 'jumpstart' || kind === 'harmonize';
+      stackItem.viaFlashback = kind === 'flashback' || kind === 'jumpstart' || kind === 'harmonize' || kind === 'aftermath';
       stackItem.viaEscape = kind === 'escape';
       stackItem.graveyardVia = kind;
     }
@@ -7609,6 +7832,12 @@ export class Game {
     // happens to the permanent afterward.
     if (sacrifice) this.triggerSacrifice(perm);
 
+    // Disturb: a permanent cast transformed this way is exiled instead.
+    if (perm.disturbed) {
+      this.getPlayer(perm.ownerId).exile.push(perm.card);
+      this.log(`${perm.card.name} is exiled instead (disturb).`);
+      return;
+    }
     // Unearth's replacement: it never reaches the graveyard, so it doesn't
     // "die" either — checked before undying/persist and the dies trigger.
     if (this.exileIfUnearthed(perm)) return;
@@ -7704,6 +7933,7 @@ export class Game {
     if (perm.faceDown) { perm.card = perm.faceDown.card; perm.faceDown = null; }
     // Vehicles, awakened lands, etc. go to other zones as their real card.
     if (perm._baseCard) { perm.card = perm._baseCard; delete perm._baseCard; }
+    if (perm._dfcCard) { perm.card = perm._dfcCard; delete perm._dfcCard; }
     for (const pl of this.players) {
       for (const other of pl.battlefield.filter(x => x.attachedTo === perm.id)) {
         if (isAura(other.card)) this.movePermanentToGraveyard(other);
