@@ -210,7 +210,9 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
       // mill, damage, plain life loss) goes at the opponent. This used to
       // always pick the opponent, handing them the cards.
       const text = (card.oracleText || '').toLowerCase();
-      const helps = /target player[^.]*\b(?:draws?|gains?)\b/.test(text);
+      // Only when the TARGETED player is the one drawing/gaining — "target
+      // player loses 2 life and you gain 2 life" (a drain) used to count.
+      const helps = /target player (?:draws?|gains?)\b/.test(text);
       const loss = text.match(/loses? (\d+) life/);
       const lethal = loss && opponent.life <= parseInt(loss[1], 10);
       targets.push({ type: 'player', id: helps && !lethal ? controllerId : opponent.id });
@@ -338,6 +340,9 @@ function chooseCastWay(game, p, card) {
     && cmcOf(o.manaCost) < (card.cmc || 0))
     .sort((x, y) => cmcOf(x.manaCost) - cmcOf(y.manaCost))[0];
   if (cheaper) return { altCost: { kind: cheaper.kind } };
+  // Bestow: onto our best creature when we have one (it stays a creature
+  // if that creature dies).
+  if (options.some(o => o.kind === 'bestow') && p.battlefield.some(x => isCreature(game, x.card))) return { altCost: { kind: 'bestow' } };
   // Awaken: the bigger version whenever it's affordable.
   if (options.some(o => o.kind === 'awaken')) return { altCost: { kind: 'awaken' } };
   // Overload: worth it when the sweep hits more of the opponent's
@@ -598,7 +603,7 @@ export function takeAITurnAction(game) {
       const kicked = game.getEntwineCost(card) ? entwine : game.canAffordKicked(p.id, card);
       const gift = !altCost && shouldPromiseGift(game, card);
       const bargainFodder = game.hasBargain(card) ? game.bargainCandidates(p.id).find(x => isTokenFodder(game, x)) : null;
-      const flags = { kicked, gift, bargained: !!bargainFodder, overload: altCost?.kind === 'overload', teamwork: useTeamwork };
+      const flags = { kicked, gift, bargained: !!bargainFodder, overload: altCost?.kind === 'overload', teamwork: useTeamwork, bestow: altCost?.kind === 'bestow' };
       // An {X} spell cast at a hardcoded X=0 achieves nothing (Comet Storm-
       // style payoffs are the whole point of the card) — spend as much as
       // can actually be afforded instead, and skip the card entirely rather

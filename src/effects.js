@@ -3352,7 +3352,7 @@ export function interpretPermanentTriggers(card) {
     // choice rather than a real triggered ability in the comprehensive
     // rules, but functionally the same "do this the moment it enters"
     // dispatch point for this engine's purposes.
-    const m = line.match(/^(?:as|when(?:ever)?)\s+(.+?)\s+enters(?: the battlefield)?(?:\s+or\s+(?:attacks|becomes monstrous|leaves the battlefield))?,\s*(.+)$/);
+    const m = line.match(/^(?:as|when(?:ever)?)\s+(.+?)\s+enters(?: the battlefield)?(?:\s+or\s+(?:attacks|becomes monstrous|leaves the battlefield|the creature it haunts dies))?,\s*(.+)$/);
     if (!m) continue;
     if (/\banother\b/.test(m[1])) continue; // triggers off other permanents entering — not modeled
     // "If its prowl/surge/... cost was paid, EFFECT" (Latchkey Faerie,
@@ -4121,7 +4121,7 @@ export function getCyclingAbility(card) {
 export function getAlternativeCosts(card) {
   const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
   const result = [];
-  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload', 'mutate', 'web-slinging', 'sneak']) {
+  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload', 'mutate', 'web-slinging', 'sneak', 'bestow']) {
     const m = text.match(new RegExp(`^${kind} ((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[1] });
   }
@@ -4368,6 +4368,22 @@ export function getLevelUp(card) {
   }
   return { cost, base: lines.slice(0, firstTier < 0 ? lines.length : firstTier).join('\n'), tiers: tiers.map(t => ({ ...t, text: t.lines.join('\n') })) };
 }
+
+// Haunt: "When the creature it haunts dies, EFFECT" (also "When this
+// creature enters or the creature it haunts dies" and a spell's "When the
+// creature this card haunts dies") — the effect steps.
+export function interpretHauntTriggers(card) {
+  const lines = replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase().split('\n').map(x => x.trim());
+  const steps = [];
+  for (const line of lines) {
+    const m = line.match(/^when(?:ever)? (?:this creature enters or )?the creature (?:it|this card) haunts dies,\s*(.+)$/);
+    if (m) steps.push(...interpretEffectText(m[1]));
+  }
+  return steps;
+}
+export function hasHaunt(card) { return /^haunt\b/im.test(plainText(card)); }
+// "Splice onto Arcane {2}{R}" — the cost, or null.
+export function getSpliceCost(card) { return lineCost(card, 'splice onto arcane'); }
 
 // Batch 12 readers.
 // "More Than Meets the Eye {2}{R}" — cast it converted (back face) for that.

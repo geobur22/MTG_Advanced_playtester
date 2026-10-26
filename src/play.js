@@ -1437,7 +1437,7 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
   const extras = altCost ? {} : await chooseCastExtras(card, modeIndexes);
   if (extras && extras.teamwork && modal?.teamworkBoth) modeIndexes = modal.modes.map((_, i) => i);
   if (extras === null) return;
-  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain, overload: altCost?.kind === 'overload', teamwork: !!extras.teamwork });
+  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain, overload: altCost?.kind === 'overload', teamwork: !!extras.teamwork, bestow: altCost?.kind === 'bestow' });
   let xValue = 0;
   const parsed = parseManaCost(card.manaCost);
   if (parsed.x > 0) {

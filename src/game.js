@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending, getReconfigureCost, hasLivingWeapon, hasLivingMetal, hasStation, getStationInfo, getDevotionRequirement, getConvertCost, getCraft, getLevelUp } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending, getReconfigureCost, hasLivingWeapon, hasLivingMetal, hasStation, getStationInfo, getDevotionRequirement, getConvertCost, getCraft, getLevelUp, interpretHauntTriggers, hasHaunt, getSpliceCost } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -1708,6 +1708,7 @@ export class Game {
   // Flood Maw's promised gift widens its target from a creature to any
   // nonland permanent.
   getRequiredTargetKinds(card, modeIndexes = null, flags = null) {
+    if (flags?.bestow) return ['yourCreature'];
     if (isAura(card)) return [isEnchantPlayerAura(card) ? 'player' : 'permanent'];
     if (!isInstant(card) && !isSorcery(card)) return [];
     return expandTargetKinds(interpretSpell(card, modeIndexes, flags));
@@ -2098,8 +2099,9 @@ export class Game {
       mutateTargetId: altCost?.kind === 'mutate' ? altCost.mutateTargetId : null,
       buyback: !!kickerCost && !getKickerCost(card) && !!getBuybackCost(card),
       entwined: !!kickerCost && !getKickerCost(card) && !getBuybackCost(card) && !!getEntwineCost(card),
-      isPermanentSpell: isPermanentType(card) && !isAura(card),
-      isAura: isAura(card),
+      isPermanentSpell: isPermanentType(card) && !isAura(card) && altCost?.kind !== 'bestow',
+      isAura: isAura(card) || altCost?.kind === 'bestow',
+      bestowed: altCost?.kind === 'bestow',
       bargained: ex.bargained,
       gift: ex.gift,
       // Where it was cast from — Rebound only applies to a spell cast from hand.
@@ -2129,6 +2131,7 @@ export class Game {
     this.maybeCounterForWard(stackItem);
     this.applyCastKeywordTriggers(stackItem, playerId);
     this.triggerIncrement(playerId, manaSpent);
+    if (/\barcane\b/i.test(card.typeLine || '')) this.offerSplices(playerId, stackItem);
     // Replicate/Conspire/Casualty: "when you cast this spell, copy it" —
     // the copies go on the stack above the original.
     const copies = ex.replicate + (ex.conspire ? 1 : 0) + (ex.casualty ? 1 : 0);
@@ -2569,6 +2572,16 @@ export class Game {
   // committed to the stack, mirroring real Magic's "cast trigger" timing.
   triggerCastSpell(playerId, castCard) {
     this.triggerExtort(playerId, castCard);
+    // Prowess: whenever you cast a noncreature spell, +1/+1 until end of
+    // turn. (Only its reminder text describes this, and reminder text is
+    // stripped, so it never triggered before.)
+    if (!isCreature(castCard)) {
+      for (const perm of this.getPlayer(playerId).battlefield) {
+        if (isCreature(perm.card) && this.effectiveKeywords(perm).has('prowess')) {
+          this.applyPumpEffect({ controllerId: playerId, card: perm.card, target: { type: 'permanent', id: perm.id } }, 1, 1);
+        }
+      }
+    }
     const caster = this.getPlayer(playerId);
     for (const perm of caster.battlefield) {
       const triggers = interpretCastTriggers(perm.card);
@@ -2916,14 +2929,22 @@ export class Game {
       // Protection includes "can't be Enchanted by [quality]" — gaining it
       // in response makes the Aura's target illegal, same as it leaving.
       if (!targetPerm || this.isProtectedFrom(targetPerm, card)) {
+        // A bestowed Aura whose target is gone enters as a creature instead.
+        if (item.bestowed) {
+          this.stack.push({ ...item, isAura: false, isPermanentSpell: true, bestowed: false, altCostKind: null });
+          this.resolveTop();
+          return;
+        }
         this.log(`${card.name} has no legal target and is put into the graveyard.`);
         p.graveyard.push(card);
         return;
       }
       const perm = makePermanent(card, controllerId);
+      if (item.bestowed) perm.bestowed = true;
       perm.attachedTo = targetPerm.id;
       p.battlefield.push(perm);
-      this.log(`${card.name} enchants ${targetPerm.card.name}.`);
+      this.refreshCardState(perm);
+      this.log(`${card.name} enchants ${targetPerm.card.name}${item.bestowed ? ' (bestowed)' : ''}.`);
       // "You control enchanted creature." (Mind Control, Control Magic) — a
       // STATIC ability tying control to the Aura's own continued presence,
       // unlike every other control-changing effect in this engine (Threaten's
@@ -2948,6 +2969,13 @@ export class Game {
     if (item.altCostKind === 'awaken') {
       const aw = getAlternativeCosts(card).find(a => a.kind === 'awaken');
       if (aw) this.applyAwaken(controllerId, aw.amount);
+    }
+    // Spliced cards' effects happen too (their targets picked automatically).
+    for (const sc of item.spliced || []) {
+      const steps = interpretSpell(sc);
+      const targets = pickTargetsForKinds(this, sc, controllerId, expandTargetKinds(steps)).filter(Boolean);
+      this.log(`${sc.name}'s spliced effect resolves.`);
+      this.resolveEffectSteps(steps, targets, { controllerId, card: sc, xValue: 0 });
     }
     // A copy of a spell ceases to exist instead of going anywhere.
     if (item.isCopy) {
@@ -2998,6 +3026,9 @@ export class Game {
     if (item.viaFlashback || item.viaEscape) {
       p.exile.push(zoneCard);
       this.log(`${card.name} is exiled instead of returning to the graveyard (cast from the graveyard).`);
+    } else if (hasHaunt(zoneCard) && this.players.some(pl => pl.battlefield.some(x => isCreature(x.card)))) {
+      // Haunt (spell): exiled haunting a creature instead of the graveyard.
+      this.hauntCreature(this.getPlayer(item.ownerId || controllerId), zoneCard, controllerId, () => {});
     } else if (hasParadigm(card)) {
       // Paradigm: exiled; a free copy can be cast each first main phase.
       p.exile.push(zoneCard);
@@ -3253,6 +3284,22 @@ export class Game {
     const championType = getChampionType(perm.card);
     if (championType) this.offerChampion(perm, championType);
     if (!isCreature(perm.card)) return;
+    // Graft: whenever another creature enters, each graft creature may move
+    // a +1/+1 counter onto it. The AI only feeds its own creatures, and only
+    // from a graft creature with counters to spare.
+    for (const pl of this.players) for (const g of pl.battlefield) {
+      if (g.id === perm.id || !this.keywordAmount(g.card, 'graft') || !(g.counters['+1/+1'] > 0)) continue;
+      const aiYes = pl.id === perm.controllerId && g.counters['+1/+1'] > 1;
+      this.requestChoice(pl.id, `${g.card.name} — Graft: move a +1/+1 counter onto ${perm.card.name}?`, [
+        { label: `Move a counter onto ${perm.card.name}`, resolve: () => {
+          if (!this.findPermanent(g.id) || !this.findPermanent(perm.id) || !(g.counters['+1/+1'] > 0)) return;
+          g.counters['+1/+1'] -= 1;
+          this.applyCounterAdditionEffect({ controllerId: pl.id, card: g.card, target: { type: 'permanent', id: perm.id } }, 1, '+1/+1');
+          this.log(`${g.card.name} grafts a counter onto ${perm.card.name}.`);
+        } },
+        { label: "Don't move one", resolve: () => {} },
+      ], aiYes ? 0 : 1);
+    }
     const kws = this.effectiveKeywords(perm);
     const controller = this.getPlayer(perm.controllerId);
     const opponent = this.opponentOf(perm.controllerId);
@@ -3941,6 +3988,47 @@ export class Game {
 
   getLevelUp(card) { return getLevelUp(card); }
 
+  // Haunt: exile `card` haunting a creature (the AI's pick: the opponent's
+  // best creature, so its death soon pays off), remembered on that creature.
+  hauntCreature(owner, card, controllerId, removeFromZone) {
+    const opp = this.opponentOf(controllerId);
+    const pool = [...opp.battlefield, ...this.getPlayer(controllerId).battlefield].filter(x => isCreature(x.card));
+    const target = pool.sort((a, b) => (b.controllerId !== controllerId) - (a.controllerId !== controllerId) || this.effectivePower(b) - this.effectivePower(a))[0];
+    if (!target) return false;
+    removeFromZone();
+    owner.exile.push(card);
+    (target.hauntedBy ||= []).push({ card, controllerId });
+    this.log(`${card.name} haunts ${target.card.name}.`);
+    return true;
+  }
+
+  runHauntEffect(card, controllerId) {
+    const steps = interpretHauntTriggers(card);
+    if (!steps.length) return;
+    const targets = pickTargetsForKinds(this, card, controllerId, expandTargetKinds(steps)).filter(Boolean);
+    this.log(`The creature ${card.name} haunted died.`);
+    this.resolveEffectSteps(steps, targets, { controllerId, card });
+  }
+
+  // Splice onto Arcane: as you cast an Arcane spell, reveal Splice cards
+  // from your hand and pay their splice costs to add their effects. The AI
+  // splices whatever it can afford.
+  offerSplices(playerId, item) {
+    const p = this.getPlayer(playerId);
+    for (const sc of p.hand.filter(c => c !== item.card && getSpliceCost(c))) {
+      const cost = getSpliceCost(sc);
+      if (!this.payableNow(playerId, cost)) continue;
+      this.requestChoice(playerId, `Splice ${sc.name} onto ${item.card.name} for ${cost}?`, [
+        { label: `Splice (${cost})`, resolve: () => {
+          if (!this.stack.includes(item) || !this.payNow(playerId, cost)) return;
+          (item.spliced ||= []).push(sc);
+          this.log(`${p.name} splices ${sc.name} onto ${item.card.name}.`);
+        } },
+        { label: "Don't splice", resolve: () => {} },
+      ], 0);
+    }
+  }
+
   // ---------- Batch 13: Partner, Companion ----------
   // Companion: once per game, pay {3} at sorcery speed to put your companion
   // (from outside the game) into your hand.
@@ -4138,7 +4226,7 @@ export class Game {
   // aren't. Station also unlocks its "N+ | ..." lines. Called whenever one
   // of those states may have changed.
   tracksCardState(perm) {
-    if (perm.crewed || perm.awakened || perm.impending || perm._baseCard) return true;
+    if (perm.crewed || perm.awakened || perm.impending || perm._baseCard || perm.bestowed) return true;
     const base = perm.card;
     let tracked = CARD_STATE_MEMO.get(base);
     if (tracked === undefined) {
@@ -4164,6 +4252,8 @@ export class Game {
     const devotion = getDevotionRequirement(base);
     if (devotion && this.devotion(perm.controllerId, devotion.colors) < devotion.need) creature = false;
     if (getReconfigureCost(base) && perm.attachedTo) creature = false;
+    let bestowAura = false;
+    if (perm.bestowed && perm.attachedTo) { creature = false; bestowAura = true; }
     if (perm.impending && (perm.counters.time || 0) > 0) creature = false;
     let card = { ...base, oracleText: text };
     // Level Up: the level-counter tier in effect sets stats and abilities.
@@ -4184,6 +4274,8 @@ export class Game {
     }
     if (perm.awakened) {
       card = { ...card, typeLine: withCreatureType(base.typeLine, true, 'Elemental'), power: '0', toughness: '0', keywords: [...new Set([...(base.keywords || []), 'haste'])] };
+    } else if (bestowAura) {
+      card = { ...card, typeLine: 'Enchantment — Aura' };
     } else if (creature !== null && creature !== isCreature(base)) {
       card = { ...card, typeLine: withCreatureType(base.typeLine, creature) };
     } else if (text === (base.oracleText || '') && !station && !leveler) {
@@ -4800,6 +4892,8 @@ export class Game {
     const p = this.getPlayer(perm.controllerId);
     const modular = this.keywordAmount(card, 'modular');
     if (modular) this.applyCounterAdditionEffect(ctx, modular, '+1/+1');
+    const graft = this.keywordAmount(card, 'graft');
+    if (graft) this.applyCounterAdditionEffect(ctx, graft, '+1/+1');
     const vanishing = this.keywordAmount(card, 'vanishing');
     if (vanishing) perm.counters.time = (perm.counters.time || 0) + vanishing;
     const fading = this.keywordAmount(card, 'fading');
@@ -4939,6 +5033,14 @@ export class Game {
   applyDiesKeywords(diedPerm) {
     const card = diedPerm.card;
     const controller = this.getPlayer(diedPerm.controllerId);
+    // The creature it haunts died: each haunting card's effect happens.
+    for (const h of diedPerm.hauntedBy || []) this.runHauntEffect(h.card, h.controllerId);
+    // Haunt (creature): exile it haunting a creature.
+    if (hasHaunt(card) && isCreature(card)) {
+      const owner = this.getPlayer(diedPerm.ownerId);
+      const gi = owner.graveyard.indexOf(card);
+      if (gi !== -1) this.hauntCreature(owner, card, controller.id, () => owner.graveyard.splice(owner.graveyard.indexOf(card), 1));
+    }
     const counters = diedPerm.counters?.['+1/+1'] || 0;
     if (this.keywordAmount(card, 'modular') && counters > 0) {
       const targets = controller.battlefield.filter(x => x.id !== diedPerm.id && isCreature(x.card) && isArtifact(x.card) && this.canBeTargetedBy(x, controller.id, card))
@@ -8025,6 +8127,8 @@ export class Game {
     if (perm._dfcCard) { perm.card = perm._dfcCard; delete perm._dfcCard; }
     for (const pl of this.players) {
       for (const other of pl.battlefield.filter(x => x.attachedTo === perm.id)) {
+        // A bestowed Aura becomes a creature again instead of falling off.
+        if (other.bestowed) { other.attachedTo = null; this.refreshCardState(other); this.log(`${other.card.name} is no longer attached — it's a creature again.`); continue; }
         if (isAura(other.card)) this.movePermanentToGraveyard(other);
         else other.attachedTo = null;
       }
@@ -8452,6 +8556,8 @@ export class Game {
     if (ar.unblockable) return false;
     if (ar.exceptKeywords && !ar.exceptKeywords.some(k => bk.has(k))) return false;
     if (ar.minBlockerPower != null && this.effectivePower(blocker) < ar.minBlockerPower) return false;
+    // Skulk: can't be blocked by creatures with greater power.
+    if (ak.has('skulk') && this.effectivePower(blocker) > this.effectivePower(attacker)) return false;
     // Unleash: can't block while it has a +1/+1 counter on it.
     if (bk.has('unleash') && (blocker.counters['+1/+1'] || 0) > 0) return false;
     if (ak.has('flying') && !bk.has('flying') && !bk.has('reach')) return false;
@@ -8515,7 +8621,17 @@ export class Game {
   // Fetters) — the actual "is this creature allowed to attack" check;
   // canAttackDespiteSickness alone only answers the sickness half.
   canDeclareAsAttacker(perm) {
-    return this.canAttackDespiteSickness(perm) && !this.effectiveKeywords(perm).has('cantAttack');
+    const kws = this.effectiveKeywords(perm);
+    // Defender can't attack (unless something lets it attack "as though it
+    // didn't have defender") — it was listed as a keyword but never enforced.
+    if (kws.has('defender') && !/as though (?:it|they) didn'?t have defender/i.test(this.allOracleTextAffecting(perm))) return false;
+    return this.canAttackDespiteSickness(perm) && !kws.has('cantAttack');
+  }
+
+  // The permanent's own text plus every other permanent's (for "as though
+  // it didn't have defender"-style permissions granted from elsewhere).
+  allOracleTextAffecting(perm) {
+    return [perm.card.oracleText || '', ...this.players.flatMap(pl => pl.battlefield.filter(x => x !== perm).map(x => x.card.oracleText || ''))].join('\n');
   }
 
   beginDeclareAttackers() {
