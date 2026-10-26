@@ -1725,6 +1725,28 @@ function getAvailableActionsForPermanent(perm) {
     }
   });
 
+  // Vehicles, Mounts, Spacecraft, Reconfigure Equipment.
+  if (game.canCrew(HUMAN_ID, perm.id)) actions.push({ label: `Crew ${game.keywordAmount(perm.card, 'crew')}`, execute: () => { const r = game.crew(HUMAN_ID, perm.id); if (!r.ok) showAlert(r.reason); } });
+  if (game.canSaddle(HUMAN_ID, perm.id)) actions.push({ label: `Saddle ${game.keywordAmount(perm.card, 'saddle')}`, execute: () => { const r = game.saddle(HUMAN_ID, perm.id); if (!r.ok) showAlert(r.reason); } });
+  if (game.canStation(HUMAN_ID, perm.id)) {
+    actions.push({ label: `Station (${perm.counters.charge || 0} charge)`, execute: async () => {
+      const pool = game.getPlayer(HUMAN_ID).battlefield.filter(x => x.id !== perm.id && game.isCreature(x.card) && !x.tapped && game.effectivePower(x) > 0);
+      const pick = await pickPermanentFromList('Tap which creature to station?', pool);
+      if (pick) { const r = game.station(HUMAN_ID, perm.id, pick.id); if (!r.ok) showAlert(r.reason); }
+    } });
+  }
+  if (game.canReconfigure(HUMAN_ID, perm.id)) {
+    actions.push({ label: perm.attachedTo ? 'Reconfigure: unattach' : 'Reconfigure: attach', execute: async () => {
+      let targetId = null;
+      if (!perm.attachedTo) {
+        const pick = await pickPermanentFromList('Attach to which creature?', game.getPlayer(HUMAN_ID).battlefield.filter(x => x.id !== perm.id && game.isCreature(x.card)));
+        if (!pick) return;
+        targetId = pick.id;
+      }
+      const r = game.reconfigure(HUMAN_ID, perm.id, targetId); if (!r.ok) showAlert(r.reason);
+    } });
+  }
+
   // Turn a face-down permanent face up.
   if (perm.faceDown && game.canTurnFaceUp(HUMAN_ID, perm.id)) {
     actions.push({ label: `Turn face up (${perm.faceDown.card.name}, ${game.faceUpCost(perm)})`, execute: () => { const r = game.turnFaceUp(HUMAN_ID, perm.id); if (!r.ok) showAlert(r.reason); } });

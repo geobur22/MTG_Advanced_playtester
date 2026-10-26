@@ -338,6 +338,8 @@ function chooseCastWay(game, p, card) {
     && cmcOf(o.manaCost) < (card.cmc || 0))
     .sort((x, y) => cmcOf(x.manaCost) - cmcOf(y.manaCost))[0];
   if (cheaper) return { altCost: { kind: cheaper.kind } };
+  // Awaken: the bigger version whenever it's affordable.
+  if (options.some(o => o.kind === 'awaken')) return { altCost: { kind: 'awaken' } };
   // Overload: worth it when the sweep hits more of the opponent's
   // permanents than ours, and at least two of theirs.
   const overload = options.find(o => o.kind === 'overload');
@@ -364,6 +366,8 @@ function chooseCastWay(game, p, card) {
   if (evoke && /when this creature (?:enters|leaves)/i.test((card.oracleText || '').split(card.name).join('this creature'))) return { altCost: { kind: 'evoke' } };
   const prototype = options.find(o => o.kind === 'prototype');
   if (prototype) return { altCost: { kind: 'prototype' } };
+  // Impending: the cheap non-creature version when the full cost is out of reach.
+  if (options.some(o => o.kind === 'impending')) return { altCost: { kind: 'impending' } };
   // Warp: a cheap cast now for the enters trigger (the creature is exiled
   // at end of turn and can be recast later) — only when the normal cost
   // isn't affordable and there's an ETB worth having, in main 1 so it can
@@ -607,6 +611,27 @@ export function takeAITurnAction(game) {
       if (game.canLevelUpClass(p.id, perm.id)) {
         const result = game.levelUpClass(p.id, perm.id);
         if (result.ok) return;
+      }
+    }
+
+    // Vehicles / Mounts before combat: crew or saddle with creatures that
+    // aren't attacking anyway (summoning sick first), when the Vehicle hits
+    // harder than its crew. Spacecraft: station in main 2 with what's left.
+    // Reconfigure: put an Equipment creature on our biggest creature.
+    for (const perm of p.battlefield) {
+      if (game.step === 'main1' && game.canCrew(p.id, perm.id)) {
+        const crew = game.crewPick(p.id, perm, game.keywordAmount(perm.card, 'crew'));
+        const crewPower = crew.filter(x => !x.summoningSick).reduce((n, x) => n + game.effectivePower(x), 0);
+        if ((parseInt((perm._baseCard || perm.card).power, 10) || 0) > crewPower && !perm.summoningSick && game.crew(p.id, perm.id).ok) return;
+      }
+      if (game.step === 'main1' && game.canSaddle(p.id, perm.id) && game.canDeclareAsAttacker(perm)) {
+        const crew = game.crewPick(p.id, perm, game.keywordAmount(perm.card, 'saddle'));
+        if (crew.every(x => x.summoningSick || game.effectivePower(x) <= 1) && game.saddle(p.id, perm.id).ok) return;
+      }
+      if (game.step === 'main2' && game.canStation(p.id, perm.id) && game.station(p.id, perm.id).ok) return;
+      if (game.step === 'main1' && !perm.attachedTo && game.canReconfigure(p.id, perm.id)) {
+        const host = p.battlefield.filter(x => x.id !== perm.id && isCreature(game, x.card)).sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0];
+        if (host && game.effectivePower(host) >= 3 && game.reconfigure(p.id, perm.id, host.id).ok) return;
       }
     }
 

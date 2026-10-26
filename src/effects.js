@@ -3785,9 +3785,10 @@ export function interpretAttackTriggers(card) {
     // simplification made elsewhere for wording this engine can't fully
     // track, like "the first time" counters) — it just stops the line from
     // being silently unrecognized.
-    const m = line.match(/^when(?:ever)?\s+(.+?)\s+(?:enters(?: the battlefield)?\s+or\s+)?attacks(?: for the \w+ time each turn)?,\s*(.+)$/);
+    // (Also "attacks while saddled" — Mounts; checked by game.js.)
+    const m = line.match(/^when(?:ever)?\s+(.+?)\s+(?:enters(?: the battlefield)?\s+or\s+)?attacks( while saddled)?(?: for the \w+ time each turn)?,\s*(.+)$/);
     if (!m) continue;
-    triggers.push({ scope: classifyOwnerScope(m[1]), steps: interpretEffectText(m[2]) });
+    triggers.push({ scope: classifyOwnerScope(m[1]), steps: interpretEffectText(m[3]), whileSaddled: !!m[2] });
   }
   const allUnsupported = triggers.length === 0 || triggers.every(t => isFullyUnsupported(t.steps));
   if (allUnsupported) {
@@ -4070,6 +4071,11 @@ export function getAlternativeCosts(card) {
     const m = text.match(new RegExp(`^${kind} ((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[1] });
   }
+  // "Awaken 4—{5}{W}{W}{W}" / "Impending 4—{1}{G}{G}": a cost plus a number.
+  for (const kind of ['awaken', 'impending']) {
+    const m = text.match(new RegExp(`^${kind} (\\d+)\\s*[—-]\\s*((?:\\{[^}]+\\})+)`, 'im'));
+    if (m) result.push({ kind, manaCost: m[2], amount: parseInt(m[1], 10) });
+  }
   const proto = text.match(/^prototype ((?:\{[^}]+\})+)\s*[—-]\s*(\d+)\/(\d+)/im);
   if (proto) result.push({ kind: 'prototype', manaCost: proto[1], power: proto[2], toughness: proto[3] });
   return result;
@@ -4259,6 +4265,28 @@ export function getFirebending(card) {
   if (!m) return null;
   if (!/^x$/i.test(m[1])) return { amount: parseInt(m[1], 10) };
   return /power/i.test(m[2] || '') ? { x: 'power' } : null;
+}
+
+// Batch 11 readers.
+export function getReconfigureCost(card) { return lineCost(card, 'reconfigure'); }
+export function hasLivingWeapon(card) { return /^living weapon\b/im.test(plainText(card)); }
+export function hasLivingMetal(card) { return /^living metal\b/im.test(plainText(card)); }
+export function hasStation(card) { return /^station\b/im.test(plainText(card)); }
+// Station thresholds: "8+ | Flying" lines → [{ n, text }], plus the
+// reminder's "It's an artifact creature at 8+".
+export function getStationInfo(card) {
+  const raw = card.oracleText || '';
+  const tiers = [...raw.matchAll(/^(\d+)\+ \| (.+)$/gm)].map(m => ({ n: parseInt(m[1], 10), text: m[2] }));
+  const creatureAt = (raw.match(/artifact creature at (\d+)\+/i) || [])[1];
+  return { tiers, creatureAt: creatureAt ? parseInt(creatureAt, 10) : null };
+}
+// "As long as your devotion to white is less than five, Heliod isn't a
+// creature." — { colors: ['W'], need } or null.
+export function getDevotionRequirement(card) {
+  const COLOR = { white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G' };
+  const m = plainText(card).match(/as long as your devotion to (white|blue|black|red|green)(?: and (white|blue|black|red|green))? is less than (\w+), [^.]+ isn't a creature/i);
+  if (!m) return null;
+  return { colors: [COLOR[m[1].toLowerCase()], m[2] && COLOR[m[2].toLowerCase()]].filter(Boolean), need: parseAmount(m[3].toLowerCase()) };
 }
 
 // Optional costs paid as a spell is cast (batch 4b). Each returns null when

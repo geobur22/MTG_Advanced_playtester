@@ -1,5 +1,5 @@
 import { shuffle } from './deck.js';
-import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending } from './effects.js';
+import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending, getReconfigureCost, hasLivingWeapon, hasLivingMetal, hasStation, getStationInfo, getDevotionRequirement } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
 
@@ -38,6 +38,17 @@ function hasTypeWord(card, word) {
   const typeLine = (card.typeLine || '').toLowerCase();
   if (typeLine.includes(word)) return true;
   return isChangeling(card) && !NON_CREATURE_TYPE_WORDS.has(word) && /creature|kindred|tribal/.test(typeLine);
+}
+
+// A type line with "Creature" added or removed ("Artifact — Vehicle" →
+// "Artifact Creature — Vehicle"), optionally adding a subtype.
+const CARD_STATE_MEMO = new WeakMap();
+function withCreatureType(typeLine, creature, subtype = null) {
+  let [types, subs = ''] = (typeLine || '').split('—').map(x => x.trim());
+  if (creature && !/\bcreature\b/i.test(types)) types = `${types} Creature`;
+  if (!creature) types = types.replace(/\s*\bCreature\b/i, '').trim();
+  if (subtype && !new RegExp(`\\b${subtype}\\b`, 'i').test(subs)) subs = `${subtype} ${subs}`.trim();
+  return subs ? `${types} — ${subs}` : types;
 }
 
 // cost minus another cost (Power-up's reduction, Harmonize's tap), as a
@@ -287,7 +298,9 @@ function makePermanent(card, controllerId) {
     controllerId,
     ownerId: controllerId,
     tapped: false,
-    summoningSick: isCreature(card),
+    // Every nonland permanent is "new" the turn it arrives — only matters
+    // for creatures, but a Vehicle crewed the turn it entered can't attack.
+    summoningSick: !isLand(card),
     damage: 0,
     counters,
     attachedTo: null, // for Auras/Equipment: instanceId of permanent this is on
@@ -1281,6 +1294,7 @@ export class Game {
     }
     if (step === 'end') {
       if (this.monarch === this.active.id) { this.log(`${this.active.name} draws a card (the monarch).`); this.drawCard(this.active); }
+      this.tickImpending(this.active);
       this.exileUnearthedPermanents();
       this.endStepAltCostCleanup();
       this.triggerPhase(interpretEndStepTriggers);
@@ -2598,9 +2612,11 @@ export class Game {
   // always belong to that same player, never an opponent watching.
   triggerAttacks(attackerPerm) {
     const controller = this.getPlayer(attackerPerm.controllerId);
-    for (const watcher of controller.battlefield) {
+    for (const watcher of [...controller.battlefield]) {
+      if (!this.findPermanent(watcher.id)) continue;
       const triggers = interpretAttackTriggers(watcher.card);
       for (const trig of triggers) {
+        if (trig.whileSaddled && !(watcher.id === attackerPerm.id && attackerPerm.saddled)) continue;
         // "Whenever enchanted/equipped creature attacks, ..." (Ordeal of
         // Heliod, and the same template on plenty of other Auras and
         // Equipment) — only fires when the watcher (the Aura/Equipment
@@ -2745,6 +2761,11 @@ export class Game {
       if (item.viaSuspend && isCreature(card)) perm.tempKeywords.push('haste');
       // Alternative costs that change the permanent itself.
       perm.altCostKind = item.altCostKind || null;
+      if (item.altCostKind === 'impending') {
+        const imp = getAlternativeCosts(card).find(a => a.kind === 'impending');
+        perm.impending = true;
+        perm.counters.time = (perm.counters.time || 0) + (imp?.amount || 0);
+      }
       if (item.altCostKind === 'dash' || item.altCostKind === 'blitz') perm.tempKeywords.push('haste');
       if (item.altCostKind === 'sneak' && isCreature(card) && item.sneakTarget && ['declareBlockers', 'combatDamage'].includes(this.step)) {
         perm.tapped = true; perm.attacking = true; perm.attackedThisTurn = true; perm.attackTarget = item.sneakTarget; perm.blockedBy = [];
@@ -2763,6 +2784,7 @@ export class Game {
       // it unless it escaped") — see castFromGraveyard.
       perm.escaped = !!item.viaEscape;
       p.battlefield.push(perm);
+      this.refreshCardState(perm);
       this.log(`${card.name} enters the battlefield under ${p.name}'s control.`);
       // "This creature enters with N +1/+1 counters on it" (Hangarback
       // Walker's own X-based count, Kalonian Hydra's fixed one) — applied
@@ -2860,6 +2882,10 @@ export class Game {
     // this resolution came from castFromGraveyard's Flashback/Escape path.
     const flags = { kicked: item.kicked, bargained: item.bargained, gift: item.gift, overload: item.altCostKind === 'overload', teamwork: item.teamwork };
     this.resolveEffectSteps(interpretSpell(card, item.modeIndexes, flags), item.targets, { controllerId, card, xValue: item.xValue, castFromGraveyard: !!(item.viaFlashback || item.viaEscape || item.fromZone === 'graveyard') });
+    if (item.altCostKind === 'awaken') {
+      const aw = getAlternativeCosts(card).find(a => a.kind === 'awaken');
+      if (aw) this.applyAwaken(controllerId, aw.amount);
+    }
     // A copy of a spell ceases to exist instead of going anywhere.
     if (item.isCopy) {
       this.checkStateBasedActions();
@@ -3130,6 +3156,13 @@ export class Game {
       this.applyTokenEffect({ controllerId: p.id, card: perm.card }, 1, 2, 2, 'red rebel');
       const rebel = p.battlefield[p.battlefield.length - 1];
       if (this.findPermanent(perm.id)) { perm.attachedTo = rebel.id; this.log(`${perm.card.name} is attached to the Rebel.`); }
+    }
+    if (hasLivingWeapon(perm.card)) {
+      // Living weapon: a 0/0 black Phyrexian Germ token, then attach this to it.
+      const p = this.getPlayer(perm.controllerId);
+      this.applyTokenEffect({ controllerId: p.id, card: perm.card }, 1, 0, 0, 'black phyrexian germ');
+      const germ = p.battlefield[p.battlefield.length - 1];
+      if (this.findPermanent(perm.id)) { germ.card = { ...germ.card, name: 'Phyrexian Germ' }; perm.attachedTo = germ.id; this.log(`${perm.card.name} is attached to a Phyrexian Germ.`); }
     }
     if (hasJobSelect(perm.card)) {
       // Job select: a 1/1 colorless Hero token, then attach this to it.
@@ -3792,6 +3825,205 @@ export class Game {
           this.movePermanentToGraveyard(perm, { sacrifice: true });
         }
       }
+    }
+  }
+
+  // ---------- Batch 11: permanents that become (or stop being) creatures ----------
+  // A permanent's current card is derived from its original (perm._baseCard)
+  // plus its state: crewed Vehicles and permanents under Living Metal (on
+  // their controller's turn), Spacecraft past their station threshold, and
+  // awakened lands are creatures; an attached Reconfigure Equipment, an
+  // Impending permanent with time counters, and a God short on devotion
+  // aren't. Station also unlocks its "N+ | ..." lines. Called whenever one
+  // of those states may have changed.
+  tracksCardState(perm) {
+    if (perm.crewed || perm.awakened || perm.impending || perm._baseCard) return true;
+    const base = perm.card;
+    let tracked = CARD_STATE_MEMO.get(base);
+    if (tracked === undefined) {
+      tracked = !!(getReconfigureCost(base) || hasLivingMetal(base) || hasStation(base) || getDevotionRequirement(base) || this.keywordAmount(base, 'crew'));
+      CARD_STATE_MEMO.set(base, tracked);
+    }
+    return tracked;
+  }
+
+  refreshCardState(perm) {
+    if (!this.tracksCardState(perm)) return;
+    const base = perm._baseCard || perm.card;
+    let text = base.oracleText || '';
+    let creature = null;
+    const station = hasStation(base) ? getStationInfo(base) : null;
+    if (station) {
+      const charge = perm.counters.charge || 0;
+      text = text.split('\n').map(l => { const m = l.match(/^(\d+)\+ \| (.+)$/); return m ? (charge >= parseInt(m[1], 10) ? m[2] : null) : l; }).filter(l => l !== null).join('\n');
+      if (station.creatureAt != null && charge >= station.creatureAt) creature = true;
+    }
+    if (perm.crewed) creature = true;
+    if (hasLivingMetal(base) && this.active?.id === perm.controllerId) creature = true;
+    const devotion = getDevotionRequirement(base);
+    if (devotion && this.devotion(perm.controllerId, devotion.colors) < devotion.need) creature = false;
+    if (getReconfigureCost(base) && perm.attachedTo) creature = false;
+    if (perm.impending && (perm.counters.time || 0) > 0) creature = false;
+    let card = { ...base, oracleText: text };
+    if (station) {
+      // Keywords on station lines count only once unlocked.
+      const charge = perm.counters.charge || 0;
+      const locked = new Set(station.tiers.filter(t => charge < t.n).flatMap(t => extractKnownKeywords(t.text.toLowerCase())));
+      const unlocked = station.tiers.filter(t => charge >= t.n).flatMap(t => extractKnownKeywords(t.text.toLowerCase()));
+      card.keywords = [...new Set([...(base.keywords || []).filter(k => !locked.has(k.toLowerCase())), ...unlocked])];
+    }
+    if (perm.awakened) {
+      card = { ...card, typeLine: withCreatureType(base.typeLine, true, 'Elemental'), power: '0', toughness: '0', keywords: [...new Set([...(base.keywords || []), 'haste'])] };
+    } else if (creature !== null && creature !== isCreature(base)) {
+      card = { ...card, typeLine: withCreatureType(base.typeLine, creature) };
+    } else if (text === (base.oracleText || '') && !station) {
+      card = base;
+    }
+    if (card === base) { if (perm._baseCard) { perm.card = base; delete perm._baseCard; } return; }
+    perm._baseCard = base;
+    perm.card = card;
+  }
+
+  refreshAllCardStates() {
+    for (const pl of this.players) for (const perm of pl.battlefield) this.refreshCardState(perm);
+  }
+
+  // Devotion: colored mana symbols among the mana costs of your permanents.
+  devotion(playerId, colors) {
+    let n = 0;
+    for (const perm of this.getPlayer(playerId).battlefield) {
+      const parsed = parseManaCost((perm._baseCard || perm.card).manaCost || '');
+      for (const c of colors) n += parsed.colors[c] || 0;
+      for (const h of parsed.hybrid) if (h.some(c => colors.includes(c))) n += 1;
+    }
+    return n;
+  }
+
+  // Crew N / Saddle N: tap other untapped creatures with total power N or
+  // more (summoning-sick ones are fine). The AI and the default pick use
+  // the weakest set that's enough.
+  crewPick(playerId, perm, need) {
+    const pool = this.getPlayer(playerId).battlefield.filter(x => x.id !== perm.id && isCreature(x.card) && !x.tapped && this.effectivePower(x) > 0)
+      .sort((a, b) => (b.summoningSick - a.summoningSick) || (this.effectivePower(a) - this.effectivePower(b)));
+    const crew = [];
+    let total = 0;
+    for (const x of pool) { if (total >= need) break; crew.push(x); total += this.effectivePower(x); }
+    return total >= need ? crew : null;
+  }
+
+  canCrew(playerId, permId) {
+    const perm = this.findPermanent(permId);
+    if (!perm || perm.controllerId !== playerId || perm.crewed || this.gameOver || this.pendingRequest || this.priorityPlayer.id !== playerId || this.splitSecondActive()) return false;
+    const n = this.keywordAmount(perm._baseCard || perm.card, 'crew');
+    return n > 0 && !!this.crewPick(playerId, perm, n);
+  }
+
+  crew(playerId, permId) {
+    if (!this.canCrew(playerId, permId)) return { ok: false, reason: "Can't crew that right now." };
+    const perm = this.findPermanent(permId);
+    const crew = this.crewPick(playerId, perm, this.keywordAmount(perm._baseCard || perm.card, 'crew'));
+    for (const x of crew) x.tapped = true;
+    perm.crewed = true;
+    this.refreshCardState(perm);
+    this.log(`${this.getPlayer(playerId).name} crews ${perm.card.name} with ${crew.map(x => x.card.name).join(', ')}.`);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  canSaddle(playerId, permId) {
+    const perm = this.findPermanent(permId);
+    if (!perm || perm.controllerId !== playerId || perm.saddled || this.gameOver || this.pendingRequest || this.splitSecondActive()) return false;
+    if (!(this.active.id === playerId && this.priorityPlayer.id === playerId && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    const n = this.keywordAmount(perm.card, 'saddle');
+    return n > 0 && !!this.crewPick(playerId, perm, n);
+  }
+
+  saddle(playerId, permId) {
+    if (!this.canSaddle(playerId, permId)) return { ok: false, reason: "Can't saddle that right now." };
+    const perm = this.findPermanent(permId);
+    const crew = this.crewPick(playerId, perm, this.keywordAmount(perm.card, 'saddle'));
+    for (const x of crew) x.tapped = true;
+    perm.saddled = true;
+    this.log(`${this.getPlayer(playerId).name} saddles ${perm.card.name} with ${crew.map(x => x.card.name).join(', ')}.`);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  // Station: tap another creature you control to put charge counters equal
+  // to its power on this (sorcery speed). The AI stations with its
+  // strongest untapped creature that isn't going to attack.
+  canStation(playerId, permId) {
+    const perm = this.findPermanent(permId);
+    if (!perm || perm.controllerId !== playerId || !hasStation(perm._baseCard || perm.card) || this.gameOver || this.pendingRequest || this.splitSecondActive()) return false;
+    if (!(this.active.id === playerId && this.priorityPlayer.id === playerId && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    return this.getPlayer(playerId).battlefield.some(x => x.id !== perm.id && isCreature(x.card) && !x.tapped && this.effectivePower(x) > 0);
+  }
+
+  station(playerId, permId, creatureId = null) {
+    if (!this.canStation(playerId, permId)) return { ok: false, reason: "Can't station right now." };
+    const perm = this.findPermanent(permId);
+    const pool = this.getPlayer(playerId).battlefield.filter(x => x.id !== perm.id && isCreature(x.card) && !x.tapped && this.effectivePower(x) > 0);
+    const helper = pool.find(x => x.id === creatureId) || pool.sort((a, b) => this.effectivePower(b) - this.effectivePower(a))[0];
+    helper.tapped = true;
+    const n = this.effectivePower(helper);
+    perm.counters.charge = (perm.counters.charge || 0) + n;
+    this.refreshCardState(perm);
+    this.log(`${this.getPlayer(playerId).name} stations ${perm.card.name} with ${helper.card.name} (${perm.counters.charge} charge).`);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  // Reconfigure {cost}: attach to a creature you control (the AI's best),
+  // or unattach; sorcery speed. While attached it isn't a creature.
+  canReconfigure(playerId, permId) {
+    const perm = this.findPermanent(permId);
+    if (!perm || perm.controllerId !== playerId || this.gameOver || this.pendingRequest || this.splitSecondActive()) return false;
+    const cost = getReconfigureCost(perm._baseCard || perm.card);
+    if (!cost || !(this.active.id === playerId && this.priorityPlayer.id === playerId && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
+    if (!perm.attachedTo && !this.getPlayer(playerId).battlefield.some(x => x.id !== perm.id && isCreature(x.card))) return false;
+    return this.payableNow(playerId, cost);
+  }
+
+  reconfigure(playerId, permId, targetId = null) {
+    if (!this.canReconfigure(playerId, permId)) return { ok: false, reason: "Can't reconfigure right now." };
+    const perm = this.findPermanent(permId);
+    this.payNow(playerId, getReconfigureCost(perm._baseCard || perm.card));
+    if (perm.attachedTo) {
+      perm.attachedTo = null;
+      this.log(`${perm.card.name} unattaches and is a creature again.`);
+    } else {
+      const pool = this.getPlayer(playerId).battlefield.filter(x => x.id !== perm.id && isCreature(x.card));
+      const host = pool.find(x => x.id === targetId) || pool.sort((a, b) => this.effectivePower(b) - this.effectivePower(a))[0];
+      perm.attachedTo = host.id;
+      perm.attacking = false; perm.blocking = null;
+      this.log(`${perm.card.name} reconfigures onto ${host.card.name}.`);
+    }
+    this.refreshCardState(perm);
+    this.afterAction(playerId);
+    return { ok: true };
+  }
+
+  // Awaken: the land you control that gets the counters and becomes a 0/0
+  // Elemental creature with haste — a tapped land first, so untapped mana
+  // isn't lost.
+  applyAwaken(playerId, amount) {
+    const p = this.getPlayer(playerId);
+    const lands = p.battlefield.filter(x => isLand(x.card) && !x.awakened);
+    const land = lands.find(x => x.tapped) || lands[0];
+    if (!land) return;
+    land.awakened = true;
+    this.refreshCardState(land);
+    this.applyCounterAdditionEffect({ controllerId: playerId, card: land.card, target: { type: 'permanent', id: land.id } }, amount, '+1/+1');
+    this.log(`${land.card.name} awakens as a ${amount}/${amount} Elemental with haste.`);
+  }
+
+  // Impending: at the beginning of your end step, remove a time counter;
+  // with none left, it's a creature.
+  tickImpending(p) {
+    for (const perm of p.battlefield.filter(x => x.impending && (x.counters.time || 0) > 0)) {
+      perm.counters.time -= 1;
+      if (perm.counters.time === 0) { perm.impending = false; this.log(`${perm.card.name}'s last time counter is removed — it's a creature now.`); }
+      this.refreshCardState(perm);
     }
   }
 
@@ -7470,6 +7702,8 @@ export class Game {
   detachFromLeavingBattlefield(perm) {
     // A face-down permanent is revealed as it leaves the battlefield.
     if (perm.faceDown) { perm.card = perm.faceDown.card; perm.faceDown = null; }
+    // Vehicles, awakened lands, etc. go to other zones as their real card.
+    if (perm._baseCard) { perm.card = perm._baseCard; delete perm._baseCard; }
     for (const pl of this.players) {
       for (const other of pl.battlefield.filter(x => x.attachedTo === perm.id)) {
         if (isAura(other.card)) this.movePermanentToGraveyard(other);
@@ -8297,6 +8531,7 @@ export class Game {
 
   checkStateBasedActions() {
     if (this.gameOver) return;
+    this.refreshAllCardStates();
     // Start your engines!: speed starts at 1; it rises once per turn (max 4)
     // when an opponent loses life during your turn. Storied: three or more
     // artifacts/legendaries/Sagas gives an enduring story for good.
@@ -8369,6 +8604,8 @@ export class Game {
         perm.damage = 0;
         perm.tempBuffs = [];
         perm.tempKeywords = [];
+        // Crewed / saddled last until end of turn.
+        if (perm.crewed || perm.saddled) { perm.crewed = false; perm.saddled = false; this.refreshCardState(perm); }
       }
       p.manaPool = { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 };
     }
