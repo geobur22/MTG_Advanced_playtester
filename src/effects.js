@@ -646,6 +646,25 @@ function interpretEffectText(text) {
       continue;
     }
 
+    // Bite / fight spells: "Target creature you control deals damage equal
+    // to its power to target creature [an opponent controls]" (Rabid Bite,
+    // HULK SMASH!) and "Target creature you control fights target creature
+    // you don't control" — the first target is yours, the second the
+    // victim (see game.js's applyBiteEffect).
+    if ((m = clause.match(/^target creature you control (fights|deals damage equal to its power to) (?:up to one )?(?:another )?target (creature(?: or planeswalker)?)(?: an opponent controls| you don'?t control)?$/))) {
+      const fight = m[1] === 'fights';
+      steps.push({ kind: 'biteSource', targeting: 'yourCreature', resolve: (game, ctx) => { game._biteSourceId = ctx.target?.id || null; } });
+      steps.push({ kind: fight ? 'fight' : 'bite', targeting: describeTargetKind(`target ${m[2]} an opponent controls`), resolve: (game, ctx) => game.applyBiteEffect(ctx, fight) });
+      continue;
+    }
+    // "It deals damage equal to its power to target creature ..." after a
+    // "target creature you control gets ..." sentence (Huatli's Final
+    // Strike) — "it" is that creature.
+    if ((m = clause.match(/^it deals damage equal to its power to (?:up to one )?target (creature(?: or planeswalker)?)(?: an opponent controls| you don'?t control)?$/))) {
+      steps.push({ kind: 'bite', targeting: describeTargetKind(`target ${m[1]} an opponent controls`), resolve: (game, ctx) => game.applyBiteEffect(ctx, false) });
+      continue;
+    }
+
     // "deals damage equal to its power to ..." (Murderous Redcap and
     // similar) — the amount isn't fixed, so it's computed at resolve time
     // from the source permanent's current power rather than parsed here.
@@ -969,6 +988,12 @@ function interpretEffectText(text) {
       continue;
     }
     if (/^tap that creature as it phases in this way$/.test(clause)) continue; // handled by phaseIn
+
+    // "Harness The Soul Stone" (Infinity Stones): its ∞ abilities turn on.
+    if (/^harness [\w\s',-]+$/.test(clause)) {
+      steps.push({ kind: 'harness', targeting: 'none', resolve: (game, ctx) => game.harness(ctx.sourcePerm) });
+      continue;
+    }
 
     // "Two target players each draw a card" (Huddle Up).
     if ((m = clause.match(/^(two|three) target players each draw (a|an|one|two|three|\d+) cards?$/))) {
@@ -3123,14 +3148,22 @@ export function isFullyUnsupported(steps) {
 export function getSpellModes(card) {
   const text = card.oracleText || '';
   const spree = /^spree\b/im.test(text);
-  const header = text.match(/^choose (one or more|one|two|up to two|any number)(?: or both)?\s*—/im);
+  // Tiered: "• Name — {cost} — effect", choose exactly one, paying its cost.
+  const tiered = /^tiered\b/im.test(text);
+  // Teamwork's "Choose one. If this spell was cast using teamwork, choose
+  // both instead." (HULK SMASH!)
+  const teamworkBoth = /^choose one\. if this spell was cast using teamwork, choose both instead\.?$/im.test(text);
+  const header = text.match(/^choose (one or more|one|two|up to two|any number)(?: or both)?\s*—/im)
+    || (teamworkBoth || tiered ? [null, 'one'] : null);
   if (!header && !spree) return null;
   const countWord = header ? header[1].toLowerCase() : 'one or more';
   const modes = [];
   for (const l of text.split('\n').map(s => s.trim())) {
     if (l.startsWith('•')) {
       const label = l.replace(/^•\s*/, '').trim();
-      modes.push({ label, steps: interpretEffectText(label.toLowerCase()) });
+      const tier = tiered && label.match(/^([^—]+?)\s*—\s*((?:\{[^}]+\})+)\s*—\s*(.+)$/);
+      if (tier) modes.push({ label: `${tier[1].trim()} (${tier[2]}): ${tier[3].trim()}`, cost: tier[2], steps: interpretEffectText(tier[3].trim().toLowerCase()) });
+      else modes.push({ label, steps: interpretEffectText(label.toLowerCase()) });
       continue;
     }
     const m = spree && l.match(/^\+\s*((?:\{[^}]+\})+)\s*[—-]\s*(.+)$/);
@@ -3146,7 +3179,7 @@ export function getSpellModes(card) {
   if (esc) escalate = /^(?:\{[^}]+\})+$/.test(escCost) ? escCost : /^discard a card$/i.test(escCost) ? 'discard' : null;
   // An escalate cost this engine can't pay (rare non-mana, non-discard
   // shapes) means only the first mode is ever chosen.
-  return { count: esc && !escalate ? 1 : count, upTo, modes, spree, escalate };
+  return { count: esc && !escalate ? 1 : count, upTo: upTo && !tiered, modes, spree, escalate, tiered, teamworkBoth };
 }
 
 // The extra mana a modal spell costs for the chosen modes: Spree's per-mode
@@ -3156,7 +3189,7 @@ export function getModeExtraCost(card, modeIndexes) {
   const modal = getSpellModes(card);
   if (!modal || !modeIndexes?.length) return '';
   let extra = '';
-  if (modal.spree) for (const i of modeIndexes) extra += modal.modes[i]?.cost || '';
+  if (modal.spree || modal.tiered) for (const i of modeIndexes) extra += (modal.modes[i]?.cost || '').replace(/\{0\}/g, '');
   if (modal.escalate && modal.escalate !== 'discard') extra += modal.escalate.repeat(Math.max(0, modeIndexes.length - 1));
   return extra;
 }
@@ -3172,10 +3205,22 @@ const CAST_CONDITIONS = [
   [/^if (?:this spell|it) was bargained,\s*/i, f => !!f.bargained],
   [/^if the gift was promised,\s*/i, f => !!f.gift],
   [/^if the gift wasn't promised,\s*/i, f => !f.gift],
+  [/^if this spell was cast using teamwork,\s*/i, f => !!f.teamwork],
 ];
 export function applyCastConditions(text, flags = {}) {
-  if (!/\bif (?:this spell|it) was (?:kicked|bargained)|\bif the gift (?:was|wasn't) promised/i.test(text)) return text;
+  // Suffix form: "Counter that spell unless its controller pays {4} instead
+  // if this spell was cast using teamwork." — becomes a plain sentence.
+  if (/ instead if this spell was cast using teamwork\./i.test(text)) {
+    text = text.split('\n').map(line => {
+      const m = line.match(/^(.*?\.)\s*(.+?) instead if this spell was cast using teamwork\.$/i);
+      return m ? (flags.teamwork ? `${m[2].replace(/^counter that spell/i, m[1].replace(/\.$/, '').match(/^\w+ target \w+/i)?.[0] || 'counter that spell')}.` : m[1]) : line;
+    }).join('\n');
+  }
+  if (!/\bif (?:this spell|it) was (?:kicked|bargained)|\bif the gift (?:was|wasn't) promised|\bif this spell was cast using teamwork/i.test(text)) return text;
   return text.split('\n').map(line => {
+    // "Choose one. If this spell was cast using teamwork, choose both
+    // instead." is about modes (getSpellModes reads it), not an effect.
+    if (/^choose one\. if this spell was cast using teamwork/i.test(line.trim())) return line;
     const clean = line.replace(/\([^()]*\)/g, '').trim();
     if (!CAST_CONDITIONS.some(([re]) => (clean.match(/[^.]+\.?/g) || []).some(s => re.test(s.trim())))) return line;
     const out = [];
@@ -3361,6 +3406,10 @@ export function interpretTapAbilities(card) {
     if (!/\{T\}/i.test(costText)) continue; // not a tap ability at all — interpretNonTapAbilities' territory
     const lowerCost = costText.toLowerCase();
     const sacrificeCost = /sacrifice/.test(lowerCost);
+    // "Exile a creature you control" as part of the cost (The Soul Stone's
+    // harness ability) and "Max speed —" (only with speed 4).
+    const exileCreatureCost = /exile (?:a|another) creature you control/.test(lowerCost);
+    const maxSpeed = /^max speed\b/.test(lowerCost.trim());
     const payLifeMatch = lowerCost.match(/pay (\d+) life/);
     const payLife = payLifeMatch ? parseInt(payLifeMatch[1], 10) : 0;
     const bracketed = costText.match(/\{[^}]+\}/g) || [];
@@ -3369,7 +3418,7 @@ export function interpretTapAbilities(card) {
     const steps = interpretEffectText(effectText.toLowerCase());
     // Exhaust (once per game) and Boast (only if it attacked this turn,
     // once per turn) — enforced by game.js.
-    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), sacrificeCost, payLife, manaCost, sorcerySpeedOnly: isSorcerySpeedOnlyLine(line), exhaust: /^exhaust\b/i.test(costText.trim()), boast: /^boast\b/i.test(costText.trim()) });
+    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), sacrificeCost, payLife, manaCost, sorcerySpeedOnly: isSorcerySpeedOnlyLine(line), exhaust: /^exhaust\b/i.test(costText.trim()), boast: /^boast\b/i.test(costText.trim()), exileCreatureCost, maxSpeed });
   }
   if (abilities.length === 0 || abilities.every(a => isFullyUnsupported(a.steps))) {
     const aiAbilities = getAITapAbilities(card);
@@ -3457,12 +3506,13 @@ export function interpretNonTapAbilities(card) {
     const manaCost = payableSymbols.join('');
     if (!manaCost && !sacMatch && !removeCountersMatch) continue; // doesn't look like a cost we recognize at all
     const effectText = m[2];
-    const steps = interpretEffectText(effectText.toLowerCase());
+    // Self-name normalized ("Put three +1/+1 counters on Human Torch").
+    const steps = interpretEffectText(replaceSelfName(card, effectText, 'this creature').toLowerCase());
     let sacrifice = null;
     if (sacMatch) sacrifice = /another/i.test(sacMatch[1]) ? 'other' : (/this|~/i.test(sacMatch[1]) ? 'self' : 'any');
     let removeCounters = null;
     if (removeCountersMatch) removeCounters = { amount: parseAmount(removeCountersMatch[1]), counterType: removeCountersMatch[2].toLowerCase() };
-    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), manaCost, sacrifice, removeCounters, exhaust: /^exhaust\b/i.test(costText), boast: /^boast\b/i.test(costText) });
+    abilities.push({ effectText, steps, isManaAbility: steps.some(s => s.kind === 'mana'), manaCost, sacrifice, removeCounters, exhaust: /^exhaust\b/i.test(costText) || /^power-up\b/i.test(costText), boast: /^boast\b/i.test(costText), powerUp: /^power-up\b/i.test(costText), maxSpeed: /^max speed\b/i.test(costText) });
   }
   if (abilities.length === 0 || abilities.every(a => isFullyUnsupported(a.steps))) {
     const aiAbilities = getAINonTapAbilities(card);
@@ -3965,7 +4015,7 @@ export function interpretCounterAddedTriggers(card) {
   const lines = (card.oracleText || '').toLowerCase().split('\n').map(s => s.trim()).filter(Boolean);
   const steps = [];
   for (const line of lines) {
-    const m = line.match(/^when(?:ever)? (?:a|one or more) counters? (?:is|are) put on this (?:creature|permanent),\s*(.+)$/);
+    const m = line.match(/^when(?:ever)? (?:a|one or more) (?:\+1\/\+1 )?counters? (?:is|are) put on this (?:creature|permanent),\s*(.+)$/);
     if (!m) continue;
     steps.push(...interpretEffectText(m[1]));
   }
@@ -4016,7 +4066,7 @@ export function getCyclingAbility(card) {
 export function getAlternativeCosts(card) {
   const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
   const result = [];
-  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload', 'mutate']) {
+  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload', 'mutate', 'web-slinging', 'sneak']) {
     const m = text.match(new RegExp(`^${kind} ((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[1] });
   }
@@ -4070,6 +4120,10 @@ export function getGraveyardCastCosts(card) {
   if (escape) out.push({ via: 'escape', manaCost: escape.manaCost, exileCount: escape.exileCount });
   if (/^jump-start\b/im.test(text) && card.manaCost) out.push({ via: 'jumpstart', manaCost: card.manaCost, discard: 'any' });
   if (/^retrace\b/im.test(text) && card.manaCost) out.push({ via: 'retrace', manaCost: card.manaCost, discard: 'land' });
+  // Harmonize: cast from the graveyard; you may tap a creature to reduce
+  // the cost by its power; exiled afterward.
+  const harmonize = text.match(/^harmonize ((?:\{[^}]+\})+)/im);
+  if (harmonize) out.push({ via: 'harmonize', manaCost: harmonize[1], tapReduce: true });
   const mayhem = text.match(/^mayhem ((?:\{[^}]+\})+)/im);
   if (mayhem) out.push({ via: 'mayhem', manaCost: mayhem[1], needsDiscardedThisTurn: true });
   return out;
@@ -4180,6 +4234,31 @@ export function interpretMutateTriggers(card) {
     if (m) steps.push(...interpretEffectText(m[1]));
   }
   return steps;
+}
+
+// Batch 10 readers (current Standard sets).
+function plainText(card) { return (card.oracleText || '').replace(/\([^()]*\)/g, ''); }
+export function hasJobSelect(card) { return /^job select\b/im.test(plainText(card)); }
+export function hasIncrement(card) { return /^increment\b/im.test(plainText(card)); }
+export function hasParadigm(card) { return /^paradigm\b/im.test(plainText(card)); }
+export function hasStartYourEngines(card) { return /^start your engines!/im.test(plainText(card)); }
+export function hasStoried(card) { return /^storied\b/im.test(plainText(card)); }
+// "Teamwork 4" — the power needed, or 0.
+export function getTeamworkAmount(card) { const m = plainText(card).match(/^teamwork (\d+)/im); return m ? parseInt(m[1], 10) : 0; }
+// "Mobilize 2" / "Mobilize X, where X is the number of creature cards in
+// your graveyard" — { amount } or { x: 'graveyardCreatures' }, or null.
+export function getMobilize(card) {
+  const m = plainText(card).match(/^mobilize (\d+|x)(?:, where x is (.+?))?\.?\s*$/im);
+  if (!m) return null;
+  if (m[1] !== 'x' && m[1] !== 'X') return { amount: parseInt(m[1], 10) };
+  return /creature cards in your graveyard/i.test(m[2] || '') ? { x: 'graveyardCreatures' } : null;
+}
+// "Firebending 2" / "Firebending X, where X is this creature's power".
+export function getFirebending(card) {
+  const m = plainText(card).match(/(?:^|,\s*)firebending (\d+|x)(?:, where x is (.+?))?\s*(?:\.|,|$)/im);
+  if (!m) return null;
+  if (!/^x$/i.test(m[1])) return { amount: parseInt(m[1], 10) };
+  return /power/i.test(m[2] || '') ? { x: 'power' } : null;
 }
 
 // Optional costs paid as a spell is cast (batch 4b). Each returns null when
@@ -4592,6 +4671,9 @@ function describeTargetKind(phrase) {
   // over-permits types it didn't name.
   const typeKeywords = ['artifact', 'creature', 'enchantment', 'land', 'planeswalker'];
   if (typeKeywords.filter(t => phrase.includes(t)).length > 1) return 'permanent';
+  // "Target creature you control" (not "you don't control") — its own kind,
+  // so bites/fights know which creature is yours.
+  if (phrase.includes('creature') && /\byou control\b/.test(phrase)) return 'yourCreature';
   if (phrase.includes('creature')) return 'creature';
   // A single noncreature permanent type ("destroy target artifact", Stone
   // Rain's "target land") — these used to fall through to the

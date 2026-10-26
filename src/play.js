@@ -360,7 +360,7 @@ function renderGraveyardView() {
     // (Also Jump-start, Retrace, and Mayhem — one button per way it can be
     // cast from here right now.)
     if (player.id === HUMAN_ID && !watchMode) {
-      const LABEL = { flashback: 'Flashback', escape: 'Escape', jumpstart: 'Jump-start', retrace: 'Retrace', mayhem: 'Mayhem' };
+      const LABEL = { flashback: 'Flashback', escape: 'Escape', jumpstart: 'Jump-start', retrace: 'Retrace', mayhem: 'Mayhem', harmonize: 'Harmonize' };
       for (const way of game.getGraveyardCastWays(HUMAN_ID, card.instanceId)) {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -607,10 +607,10 @@ function renderPlayerBar(container, player, isOpponent) {
   }
 
   // Suspended cards are public information: name and time counters left.
-  if (game.monarch === player.id || player.citysBlessing) {
+  if (game.monarch === player.id || player.citysBlessing || player.enduringStory || player.speed) {
     const status = document.createElement('span');
     status.className = 'stat';
-    status.textContent = [game.monarch === player.id && 'The monarch', player.citysBlessing && "City's blessing"].filter(Boolean).join(' · ');
+    status.textContent = [game.monarch === player.id && 'The monarch', player.citysBlessing && "City's blessing", player.enduringStory && 'Enduring story', player.speed && `Speed ${player.speed}`].filter(Boolean).join(' · ');
     container.appendChild(status);
   }
   if ((player.rebounding || []).length > 0) {
@@ -1350,7 +1350,13 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
     return;
   }
 
-  if (game.step === 'declareAttackers' || game.step === 'declareBlockers') return;
+  // Sneak is cast during the declare blockers step.
+  if (game.step === 'declareBlockers' && !skipCycleChoice && game.getCastOptions(HUMAN_ID, card).some(o => o.kind === 'sneak')) {
+    ui.abilityChoice = { perm: { card }, options: handCardAlternatives(card).filter(o => /^Sneak/.test(o.label)) };
+    render();
+    return;
+  }
+  if ((game.step === 'declareAttackers' || game.step === 'declareBlockers') && altCost?.kind !== 'sneak') return;
 
   // A card that can be cast/played OR used another way from hand —
   // Cycling, Suspend, Transmute — offers every option through the same
@@ -1397,8 +1403,9 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
   // Conspire, Casualty) — asked before targets, since a promised gift or a
   // bargain can change what the spell targets.
   const extras = altCost ? {} : await chooseCastExtras(card, modeIndexes);
+  if (extras && extras.teamwork && modal?.teamworkBoth) modeIndexes = modal.modes.map((_, i) => i);
   if (extras === null) return;
-  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain, overload: altCost?.kind === 'overload' });
+  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain, overload: altCost?.kind === 'overload', teamwork: !!extras.teamwork });
   let xValue = 0;
   const parsed = parseManaCost(card.manaCost);
   if (parsed.x > 0) {
@@ -1445,6 +1452,11 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
 async function chooseCastExtras(card, modeIndexes) {
   const extras = {};
   let committed = game.getModeExtraCost(card, modeIndexes);
+  const teamworkNeed = game.getTeamworkAmount(card);
+  if (teamworkNeed) {
+    const crew = game.teamworkCrew(HUMAN_ID, teamworkNeed);
+    if (crew.length && await showConfirm(`Teamwork ${teamworkNeed}: tap ${crew.map(x => x.card.name).join(', ')} to cast ${card.name} using teamwork?`)) extras.teamwork = crew.map(x => x.id);
+  }
   const gift = game.getGiftKind(card);
   if (gift && game.canGiveGift(card)) {
     const what = gift === 'card' ? 'draws a card' : `gets ${/^[aeiou]/.test(gift) ? 'an' : 'a'} ${gift} token`;
@@ -1603,6 +1615,7 @@ function isLegalPermanentTarget(perm) {
   if (game.pendingRequest?.type === 'etbTarget' && game.pendingRequest.sourcePermId === perm.id) return false;
   const isCreature = game.isCreature(perm.card);
   if (kind === 'creature') return isCreature;
+  if (kind === 'yourCreature') return isCreature && perm.controllerId === HUMAN_ID;
   // "Any target"/"creature or player" (see effects.js's describeTargetKind)
   // includes planeswalkers in real modern rules text.
   if (kind === 'creatureOrPlayer') return isCreature || game.isPlaneswalker(perm.card);

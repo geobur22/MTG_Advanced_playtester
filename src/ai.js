@@ -216,6 +216,15 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
       targets.push({ type: 'player', id: helps && !lethal ? controllerId : opponent.id });
       continue;
     }
+    // "Target creature you control": our best creature (biggest power — the
+    // right pick for a bite's source and for a pump alike).
+    if (kind === 'yourCreature') {
+      const own = game.getPlayer(controllerId).battlefield.filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id))
+        .sort((a, b) => game.effectivePower(b) - game.effectivePower(a));
+      if (own.length) { targets.push({ type: 'permanent', id: own[0].id }); usedIds.add(own[0].id); }
+      else targets.push(null);
+      continue;
+    }
     if (kind === 'creatureOrPlayer' || kind === 'creature') {
       // "Fights" (Fight — Territorial Allosaurus, Prey Upon, ...) is
       // removal-shaped for targeting purposes even though it neither deals
@@ -323,7 +332,8 @@ function chooseCastWay(game, p, card) {
   const normal = game.affordability(p.id, card);
   const options = game.getCastOptions(p.id, card);
   const cmcOf = (cost) => totalCmc(parseManaCost(cost));
-  const cheaper = options.filter(o => ['spectacle', 'surge', 'prowl', 'freerunning', 'dash', 'prototype'].includes(o.kind)
+  const cheaper = options.filter(o => ['spectacle', 'surge', 'prowl', 'freerunning', 'dash', 'prototype', 'web-slinging'].includes(o.kind)
+    && (o.kind !== 'web-slinging' || game.step === 'main2')
     && (o.kind !== 'dash' || game.step === 'main1')
     && cmcOf(o.manaCost) < (card.cmc || 0))
     .sort((x, y) => cmcOf(x.manaCost) - cmcOf(y.manaCost))[0];
@@ -439,7 +449,7 @@ export function takeAITurnAction(game) {
     // only cost mana come first; Escape (eats other graveyard cards) and
     // Jump-start (discards a real card) after; Retrace only by discarding
     // a land the AI can spare.
-    const order = { flashback: 0, mayhem: 0, retrace: 1, escape: 2, jumpstart: 3 };
+    const order = { flashback: 0, mayhem: 0, harmonize: 0, retrace: 1, escape: 2, jumpstart: 3 };
     const myLands = p.battlefield.filter(perm => isLand(game, perm.card)).length;
     for (const card of [...p.graveyard]) {
       const ways = game.getGraveyardCastWays(p.id, card.instanceId).sort((a, b) => order[a.via] - order[b.via]);
@@ -520,11 +530,25 @@ export function takeAITurnAction(game) {
         const allTargets = pickTargetsForKinds(game, card, p.id, allKinds).filter(Boolean);
         if (game.getMinRequiredTargetCount(card, all) <= allTargets.length) { modeIndexes = all; entwine = true; }
       }
+      // Teamwork: decided before modes, since it can mean "choose both".
+      const teamworkNeed = game.getTeamworkAmount(card);
+      const teamCrew = teamworkNeed ? game.teamworkCrew(p.id, teamworkNeed).filter(x => game.step !== 'main1' || !game.canDeclareAsAttacker(x)) : [];
+      const useTeamwork = teamworkNeed > 0 && teamCrew.reduce((n, x) => n + game.effectivePower(x), 0) >= teamworkNeed;
+      if (modal && modal.teamworkBoth && useTeamwork) {
+        const all = modal.modes.map((_, i) => i);
+        if (game.getMinRequiredTargetCount(card, all) <= pickTargetsForKinds(game, card, p.id, game.getRequiredTargetKinds(card, all)).filter(Boolean).length) { modeIndexes = all; entwine = true; }
+      }
       if (modal && !entwine) {
         modeIndexes = pickModesFor(game, modal, card, p.id);
         if (!modeIndexes) continue; // no satisfiable combination of modes — skip this card
         // Escalate/Spree: extra modes cost extra — keep only as many as can
         // be paid for (an escalate discard only when the hand can spare it).
+        // Tiered: the most expensive tier that's affordable and has targets.
+        if (modal.tiered) {
+          const ok = modal.modes.map((m, i) => i).filter(i => game.canAffordWithExtra(p.id, card, game.getModeExtraCost(card, [i])) && game.minRequiredTargetCount(modal.modes[i].steps) <= pickTargetsForKinds(game, card, p.id, game.expandTargetKinds(modal.modes[i].steps)).filter(Boolean).length);
+          if (!ok.length) continue;
+          modeIndexes = [ok[ok.length - 1]];
+        }
         if (modal.spree || modal.escalate) {
           const kept = [];
           for (const i of modeIndexes) {
@@ -542,7 +566,7 @@ export function takeAITurnAction(game) {
       const kicked = game.getEntwineCost(card) ? entwine : game.canAffordKicked(p.id, card);
       const gift = !altCost && shouldPromiseGift(game, card);
       const bargainFodder = game.hasBargain(card) ? game.bargainCandidates(p.id).find(x => isTokenFodder(game, x)) : null;
-      const flags = { kicked, gift, bargained: !!bargainFodder, overload: altCost?.kind === 'overload' };
+      const flags = { kicked, gift, bargained: !!bargainFodder, overload: altCost?.kind === 'overload', teamwork: useTeamwork };
       // An {X} spell cast at a hardcoded X=0 achieves nothing (Comet Storm-
       // style payoffs are the whole point of the card) — spend as much as
       // can actually be afforded instead, and skip the card entirely rather
@@ -571,6 +595,7 @@ export function takeAITurnAction(game) {
       // card. (An Entwine card's optional cost is entwine itself — only paid
       // when decided above, never just because it happens to be affordable.)
       const extras = altCost ? {} : chooseCastExtras(game, p, card, modeIndexes, kicked, { gift, bargainFodder });
+      if (useTeamwork && !altCost) extras.teamwork = teamCrew.map(x => x.id);
       const result = game.castSpell(p.id, card.instanceId, targets, xValue, modeIndexes, kicked, { ...(altCost ? { altCost } : {}), extras });
       if (result.ok) return;
     }
@@ -761,6 +786,18 @@ export function takeAITurnAction(game) {
   // preserve as much of this combat's own damage as possible.
   if (p.id === game.active.id && game.step === 'declareBlockers' && game.stack.length === 0) {
     const unblockedAttackers = p.battlefield.filter(perm => perm.attacking && perm.blockedBy.length === 0);
+    // Sneak: swap the weakest unblocked attacker for a sneak card — a
+    // creature that hits harder, or a spell worth casting cheaply.
+    for (const card of p.hand) {
+      const opt = game.getCastOptions(p.id, card).find(o => o.kind === 'sneak');
+      if (!opt) continue;
+      const back = game.findPermanent(opt.returnId);
+      if (isCreature(game, card) && (parseInt(card.power, 10) || 0) <= game.effectivePower(back)) continue;
+      const kinds = game.getRequiredTargetKinds(card);
+      const targets = pickTargetsForKinds(game, card, p.id, kinds).filter(Boolean);
+      if (game.getMinRequiredTargetCount(card) > targets.length) continue;
+      if (game.castSpell(p.id, card.instanceId, targets, 0, null, false, { altCost: { kind: 'sneak' } }).ok) return;
+    }
     if (unblockedAttackers.length > 0) {
       const ninjas = p.hand.filter(c => game.getNinjutsuCost(c)).sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
       const weakestAttacker = unblockedAttackers.slice().sort((a, b) => game.effectivePower(a) - game.effectivePower(b))[0];
