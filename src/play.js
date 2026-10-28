@@ -355,6 +355,15 @@ function renderGraveyardView() {
       });
       div.appendChild(btn);
     }
+    // Crucible of Worlds: play a land from the graveyard.
+    if (player.id === HUMAN_ID && !watchMode && game.isLand(card) && game.canPlayLand(HUMAN_ID) && game.extraLandSources(player).some(x => x.card === card)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'action-button primary graveyard-activate-button';
+      btn.textContent = 'Play land';
+      btn.addEventListener('click', () => { if (!game.pendingRequest) game.playLand(HUMAN_ID, card.instanceId); });
+      div.appendChild(btn);
+    }
     // Flashback and Escape — casting straight out of the graveyard on an
     // alternative cost (see game.js's castFromGraveyard).
     // Renew: exile it from the graveyard for its effect.
@@ -1025,6 +1034,27 @@ function renderHand(human) {
       : `Exiled — ${entry.remainingOwnTurns} of your turn${entry.remainingOwnTurns === 1 ? '' : 's'} left`;
     div.appendChild(badge);
     div.addEventListener('click', () => handleExiledCardClick(entry));
+    container.appendChild(div);
+  }
+  // The top card of the library, when something lets you look at it, play
+  // it (Courser of Kruphix), or cast it (Future Sight, Vizier of the
+  // Menagerie).
+  const top = human.library[0];
+  const canPlayTop = top && game.isLand(top) && game.extraLandSources(human).some(x => x.card === top);
+  const canCastTop = top && game.canCastFromLibraryTop(human, top);
+  const canSeeTop = top && (canPlayTop || canCastTop || game.hasStatic(human, /^you may look at the top card of your library any time/));
+  if (canSeeTop) {
+    const div = document.createElement('div');
+    div.className = 'card hand-card exiled-playable-card';
+    const usable = canPlayTop ? game.canPlayLand(HUMAN_ID) : canCastTop && isHandCardPlayable(top);
+    if (!usable) div.classList.add('uncastable');
+    div.appendChild(cardVisual(top));
+    attachHoverTooltip(div, top);
+    const badge = document.createElement('div');
+    badge.className = 'exiled-badge';
+    badge.textContent = canPlayTop ? 'Top of library — playable' : canCastTop ? 'Top of library — castable' : 'Top of library';
+    div.appendChild(badge);
+    if (canPlayTop || canCastTop) div.addEventListener('click', () => handleHandCardClick(top));
     container.appendChild(div);
   }
 }

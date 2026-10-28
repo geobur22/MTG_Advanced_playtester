@@ -245,6 +245,12 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
       const enemyPlaneswalkers = kind === 'creatureOrPlayer'
         ? opponent.battlefield.filter(p => game.isPlaneswalker(p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id))
         : [];
+      // Copy effects (Rite of Replication): the best creature on either side.
+      if (/copy of target creature/i.test(card.oracleText || '')) {
+        const all = game.players.flatMap(pl => pl.battlefield).filter(p => isCreature(game, p.card) && game.canBeTargetedBy(p, controllerId, card) && !usedIds.has(p.id) && !/\bLegendary\b/.test(p.card.typeLine || ''));
+        const best = all.sort((a, b) => game.effectivePower(b) + (b.card.cmc || 0) - game.effectivePower(a) - (a.card.cmc || 0))[0];
+        if (best) { targets.push({ type: 'permanent', id: best.id }); usedIds.add(best.id); continue; }
+      }
       if (isRemoval && (enemyCreatures.length > 0 || enemyPlaneswalkers.length > 0)) {
         const bestCreature = enemyCreatures.length > 0 ? enemyCreatures.sort((a, b) => game.effectivePower(b) - game.effectivePower(a))[0] : null;
         const lowestLoyaltyPw = enemyPlaneswalkers.length > 0 ? enemyPlaneswalkers.sort((a, b) => (a.counters.loyalty || 0) - (b.counters.loyalty || 0))[0] : null;
@@ -405,6 +411,10 @@ export function takeAITurnAction(game) {
     if (!p.landPlayedThisTurn) {
       const land = p.hand.find(c => isLand(game, c));
       if (land) { game.playLand(p.id, land.instanceId); return; }
+      // Crucible of Worlds / Courser of Kruphix: a land from the graveyard
+      // or the top of the library.
+      const extraLand = game.canPlayLand(p.id) && game.extraLandSources(p)[0];
+      if (extraLand && game.playLand(p.id, extraLand.card.instanceId)) return;
       // A modal double-faced card's land face (Pathways, the MDFC spell//land cycle).
       const mdfc = p.hand.find(c => game.landFaces(c).length);
       if (mdfc && game.playLandFace(p.id, mdfc.instanceId, game.landFaces(mdfc)[0].index)) return;
@@ -529,7 +539,8 @@ export function takeAITurnAction(game) {
     // (see chooseCastWay) — a card castable only through an alternative
     // (an evoked Mulldrifter, a prototyped Fleshgorger) is still playable.
     const castWays = new Map();
-    for (const c of p.hand) {
+    const topCastable = p.library[0] && game.canCastFromLibraryTop(p, p.library[0]) ? [p.library[0]] : [];
+    for (const c of [...p.hand, ...topCastable]) {
       if (isLand(game, c) || !game.canCastSpell(p.id, c)) continue;
       const way = chooseCastWay(game, p, c);
       if (way) castWays.set(c, way);

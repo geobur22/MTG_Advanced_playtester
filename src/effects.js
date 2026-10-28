@@ -159,6 +159,12 @@ function buildCondition(t) {
 export function parseCount(text) {
   const t = text.trim().toLowerCase().replace(/[.,]$/, '');
   let m;
+  // "COUNT plus N" / "COUNT minus N".
+  if ((m = t.match(/^(.+?) (plus|minus) (one|two|three|\d+)$/))) {
+    const inner = parseCount(m[1]);
+    const k = { one: 1, two: 2, three: 3 }[m[3]] ?? parseInt(m[3], 10);
+    if (inner) return (g, c) => Math.max(0, inner(g, c) + (m[2] === 'plus' ? k : -k));
+  }
   if (/^the number of basic land types among lands you control$/.test(t)) return (g, c) => ['plains', 'island', 'swamp', 'mountain', 'forest'].filter(b => ctrl(g, c).battlefield.some(x => g.isLand(x.card) && new RegExp(`\\b${b}\\b`, 'i').test(x.card.typeLine || ''))).length;
   if (/^the number of colors of mana spent to cast (?:this spell|it)$/.test(t)) return (g, c) => Object.keys(c.castInfo?.colors || c.sourcePerm?.castInfo?.colors || {}).filter(k => k !== 'C').length;
   if (/^the number of colors among permanents you control$/.test(t)) return (g, c) => new Set(ctrl(g, c).battlefield.flatMap(x => x.card.colors || [])).size;
@@ -174,6 +180,15 @@ export function parseCount(text) {
   if (/^the greatest power among creatures you control$/.test(t)) return (g, c) => Math.max(0, ...ctrl(g, c).battlefield.filter(x => g.isCreature(x.card)).map(x => g.effectivePower(x)));
   if (/^(?:this creature'?s|its) power$/.test(t)) return (g, c) => (c.sourcePerm ? g.effectivePower(c.sourcePerm) : 0);
   if (/^your life total$/.test(t)) return (g, c) => ctrl(g, c).life;
+  if (/^the number of cards in all graveyards$/.test(t)) return (g) => g.players.reduce((n, p) => n + p.graveyard.length, 0);
+  if ((m = t.match(/^the number of ([\w\s/-]+?) cards in all graveyards$/))) { const words = m[1]; return (g) => g.players.reduce((n, p) => n + p.graveyard.filter(typeTest(g, words)).length, 0); }
+  if (/^the number of cards in your opponents?'? graveyards?$/.test(t)) return (g, c) => g.opponentOf(c.controllerId).graveyard.length;
+  if (/^the number of cards in your library$/.test(t)) return (g, c) => ctrl(g, c).library.length;
+  if ((m = t.match(/^the number of ([\w\s/-]+?) on the battlefield$/))) { const words = m[1]; return (g) => g.players.reduce((n, p) => n + p.battlefield.filter(x => typeTest(g, words)(x.card)).length, 0); }
+  if (/^the number of opponents you have$/.test(t)) return () => 1;
+  if (/^the sacrificed creature'?s power$/.test(t)) return (g, c) => c.sacrificedPower || 0;
+  if (/^the sacrificed creature'?s toughness$/.test(t)) return (g, c) => (c.sacrificedCard ? parseInt(c.sacrificedCard.toughness, 10) || 0 : 0);
+  if (/^the sacrificed (?:creature|artifact|permanent)'?s mana value$/.test(t)) return (g, c) => c.sacrificedCard?.cmc || 0;
   return null;
 }
 
@@ -1536,6 +1551,32 @@ function interpretEffectText(text) {
         continue;
       }
     }
+    // Token copies of another permanent.
+    if ((m = clause.match(/^create (a|two|three|four|five|x) tokens? that'?s a copy of (target|another target|equipped creature|that permanent|each token you control)(?: ([^,]+?))?(?:, except (.+))?$/))) {
+      const countTok = m[1]; const who = m[2]; const desc = (m[3] || '').trim(); const except = m[4] || null;
+      const source = who === 'equipped creature' ? 'equipped' : who === 'each token you control' || who === 'that permanent' ? 'eachToken' : 'target';
+      const targeting = source === 'target' ? describeTargetKind(desc || 'creature') : 'none';
+      steps.push({ kind: 'tokenCopy', targeting, resolve: (game, ctx) => game.applyTokenCopyEffect(ctx, { count: countTok === 'x' ? (ctx.xValue || 0) : parseAmount(countTok), source, except }) });
+      continue;
+    }
+    // Second Harvest: "for each token you control, create a token that's a copy of that permanent".
+    if (/^for each token you control, create a token that'?s a copy of that permanent$/.test(clause)) {
+      steps.push({ kind: 'tokenCopy', targeting: 'none', resolve: (game, ctx) => game.applyTokenCopyEffect(ctx, { source: 'eachToken' }) });
+      continue;
+    }
+    if ((m = clause.match(/^(sacrifice|exile) (?:it|that token|those tokens|them) at the beginning of the next end step$/))) {
+      const mode = m[1];
+      steps.push({ kind: 'delayed', targeting: 'none', resolve: (game) => game.markLastTokenCopies(mode) });
+      continue;
+    }
+    // "If this spell was kicked, create five of those tokens instead" (Rite
+    // of Replication) — handled via the kicker rewrite when kicked; a plain
+    // no-op otherwise.
+    // Clone entry text is handled by game.js when the permanent enters.
+    if (/^you may have this (?:creature|artifact|enchantment|permanent|land) enter(?: the battlefield)?(?: tapped)? as a copy of /.test(clause)) {
+      steps.push({ kind: 'static', targeting: 'none', resolve: () => {} });
+      continue;
+    }
     // "You win the game" (Revel in Riches, after its condition).
     if (/^you win the game$/.test(clause)) {
       steps.push({ kind: 'win', targeting: 'none', resolve: (game, ctx) => game.loseGame(game.opponentOf(ctx.controllerId).id, `${ctx.card.name}`) });
@@ -1939,6 +1980,31 @@ function interpretEffectText(text) {
       continue;
     }
 
+    // "Any number of / up to two / two target creatures each get +1/+1
+    // [and gain indestructible] until end of turn" (Ajani's Presence).
+    if ((m = clause.match(/^(any number of|up to (\w+)|(two|three)) target creatures(?: you control)? each get ([+-]\d+)\/([+-]\d+)(?: and gain ([a-z\s]+?))? until end of turn$/))) {
+      const count = m[1] === 'any number of' ? 3 : parseAmount(m[2] || m[3]);
+      const pw = parseInt(m[4], 10), tg = parseInt(m[5], 10), kw = m[6] || null;
+      steps.push({ kind: 'pump', targeting: 'creature', targetCount: count, minTargets: m[3] ? count : 1, resolve: (game, ctx) => {
+        for (const t of ctx.targets || [ctx.target]) { const one = { ...ctx, target: t, targets: null }; game.applyPumpEffect(one, pw, tg); if (kw) game.applyTargetKeywordGrantEffect(one, kw); }
+      } });
+      continue;
+    }
+    // "Each opponent reveals cards from the top of their library until they
+    // reveal a land card, then puts those cards into their graveyard"
+    // (Consuming Aberration, Destroy the Evidence's "target player").
+    if ((m = clause.match(/^(each opponent|target (?:player|opponent)) reveals cards from the top of (?:their|his or her) library until (?:they reveal|a) (?:a )?land card(?: is revealed)?, then puts those cards into their graveyard$/))) {
+      const who = m[1];
+      steps.push({ kind: 'mill', targeting: who === 'each opponent' ? 'none' : 'player', resolve: (game, ctx) => {
+        const victim = who === 'each opponent' ? game.opponentOf(ctx.controllerId) : game.getPlayer(ctx.target?.id);
+        if (!victim) return;
+        let k = 0;
+        while (victim.library.length) { const c = victim.library.shift(); victim.graveyard.push(c); k++; if (game.isLand(c)) break; }
+        game.log(`${victim.name} reveals ${k} card${k === 1 ? '' : 's'} until a land and puts them into their graveyard.`);
+        game.checkStateBasedActions();
+      } });
+      continue;
+    }
     // "Target creature can't be blocked this turn" (Artful Dodge, Rogue's
     // Passage) — a temporary flag read by game.getBlockRestrictions.
     if (/^target creature(?: you control)? can'?t be blocked this turn$/.test(clause)) {
@@ -2005,6 +2071,12 @@ function interpretEffectText(text) {
     // castFromGraveyard/resolveTop when this permanent was actually cast
     // via its Escape cost; a normal hand-cast leaves it false, making the
     // sacrifice unconditional (the correct real-game outcome either way).
+    // "Sacrifice it" / "sacrifice this creature" — the source sacrifices
+    // itself (Ball Lightning's end step, Phantasmal Image when targeted).
+    if (/^sacrifice (?:it|this (?:creature|permanent|artifact|enchantment|land|aura|equipment|vehicle))$/.test(clause)) {
+      steps.push({ kind: 'sacrifice', targeting: 'none', resolve: (game, ctx) => { const self = ctx.sourcePerm && game.findPermanent(ctx.sourcePerm.id); if (self) { game.log(`${self.card.name} is sacrificed.`); game.movePermanentToGraveyard(self, { sacrifice: true }); } } });
+      continue;
+    }
     if (/^sacrifice it unless it escaped$/.test(clause)) {
       steps.push({
         kind: 'sacrifice',
@@ -3550,6 +3622,8 @@ function interpretEffectText(text) {
       steps.push({ kind: 'scry', targeting: 'none', resolve: (game, ctx) => game.applyLookAndSort(ctx, amount, 'graveyard') });
       continue;
     }
+    // Additional sacrifice/discard costs are paid on casting (game.js).
+    if (/^as an additional cost to cast this spell, (?:sacrifice an? [a-z ]+|discard (?:a|two) cards?|exile an? [a-z ]*card from your graveyard)$/.test(clause)) continue;
     // Prized Amalgam / Fraying Sanity: handled by game.js at the end step.
     if (/^(?:if it entered from your graveyard or you cast it from your graveyard, )?return this (?:card|creature) from your graveyard to the battlefield tapped at the beginning of the next end step$/.test(clause)
       || /^enchanted player mills x cards, where x is the number of cards put into their graveyard from anywhere this turn$/.test(clause)) {
@@ -3814,6 +3888,23 @@ function interpretEffectText(text) {
         resolve: (game, ctx) => { for (let i = 0; i < amount; i++) game.applyManaEffect(ctx, game.pickAnyColorChoice(ctx)); },
       });
       continue;
+    }
+    // "Draw cards equal to COUNT" (Sea Gate Restoration, Collective
+    // Unconscious).
+    if ((m = clause.match(/^draw cards equal to (.+)$/)) && parseCount(m[1])) {
+      const count = parseCount(m[1]);
+      steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => game.applyDrawEffect({ ...ctx, target: null }, count(game, ctx)) });
+      continue;
+    }
+    if (/^you have no maximum hand size for the rest of the game$/.test(clause)) {
+      steps.push({ kind: 'static', targeting: 'none', resolve: (game, ctx) => { game.getPlayer(ctx.controllerId).noMaxHandSize = true; } });
+      continue;
+    }
+    // Fallback: "A, then B" / "A and then B" where each half is understood
+    // on its own (Preordain's "scry 2, then draw a card").
+    if ((m = clause.match(/^(.+?),? (?:and )?then (.+)$/))) {
+      const a = interpretEffectText(m[1]), b = interpretEffectText(m[2]);
+      if (!isFullyUnsupported(a) && !isFullyUnsupported(b)) { steps.push(...a, ...b); continue; }
     }
   }
 
@@ -5113,6 +5204,20 @@ export function getCaseSolve(card) {
   return m ? m[1].trim() : null;
 }
 
+// "Whenever you gain life, EFFECT" (Ajani's Pridemate, Sanguine Bond,
+// Vito: "that much life" = the amount gained, passed as X) and the
+// "for the first time each turn" variant.
+export function interpretLifeGainTriggers(card) {
+  const out = [];
+  for (const line of stripAbilityWords(replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase()).split('\n').map(x => x.trim())) {
+    const m = line.match(/^whenever you gain life( for the first time each turn)?, (.+)$/);
+    if (!m) continue;
+    const effect = m[2].replace(/that much life/g, 'x life').replace(/that much/g, 'x').replace(/\.$/, '');
+    out.push({ firstEachTurn: !!m[1], steps: interpretEffectText(effect) });
+  }
+  return out;
+}
+
 // Batch 12 readers.
 // "More Than Meets the Eye {2}{R}" — cast it converted (back face) for that.
 export function getConvertCost(card) { return lineCost(card, 'more than meets the eye'); }
@@ -5283,7 +5388,7 @@ export function interpretBecomesTargetTriggers(card) {
   const lines = (card.oracleText || '').toLowerCase().split('\n').map(s => s.trim()).filter(Boolean);
   const steps = [];
   for (const line of lines) {
-    const m = line.match(/^when(?:ever)? this (?:creature|permanent) becomes the target of a spell,\s*(.+)$/);
+    const m = replaceSelfName(card, line, 'this creature').match(/^when(?:ever)? this (?:creature|permanent) becomes the target of a spell(?: or ability)?(?: an opponent controls)?,\s*(.+)$/);
     if (!m) continue;
     steps.push(...interpretEffectText(m[1]));
   }
@@ -5346,9 +5451,14 @@ export function interpretAnyEtbTriggers(card) {
   const lines = replaceSelfName(card, card.oracleText || '', 'this creature').toLowerCase().split('\n').map(s => s.trim()).filter(Boolean);
   const results = [];
   for (const line of lines) {
-    const m = line.match(/^when(?:ever)? an? ([\w\s]+?) enters(?: the battlefield)?,\s*(?:you may )?(.+)$/);
-    if (!m || m[1].trim() === 'land' || /you control/.test(m[1])) continue;
-    results.push({ typeWord: m[1].trim(), steps: interpretEffectText(m[2]) });
+    // "Whenever another creature enters" (Soul Warden, Essence Warden) and
+    // "whenever a creature an opponent controls enters" (Suture Priest).
+    const m = stripAbilityWords(line).match(/^when(?:ever)? (an?|another|one or more other|one or more) ([\w\s]+?)( an opponent controls| your opponents control)? enters?(?: the battlefield)?,\s*(?:you may )?(.+)$/);
+    if (!m || m[2].trim() === 'land' || /you control/.test(m[2])) continue;
+    let typeWord = m[2].trim().replace(/s$/, '');
+    const nontoken = /^nontoken /.test(typeWord);
+    typeWord = typeWord.replace(/^nontoken /, '');
+    results.push({ typeWord, excludesSelf: /other|another/.test(m[1]), nontoken, opponentOnly: !!m[3], steps: interpretEffectText(m[4]) });
   }
   return results;
 }
