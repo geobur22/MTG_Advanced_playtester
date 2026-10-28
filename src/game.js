@@ -1,4 +1,5 @@
 import { shuffle } from './deck.js';
+import { computeLayers, parseLayerSentence } from './layers.js';
 import { interpretSpell, interpretPermanentTriggers, interpretTapAbilities, interpretCastTriggers, interpretEquipCost, getSpellModes as getSpellModesFromText, interpretDiesTriggers, interpretAttackTriggers, interpretCombatDamageTriggers, interpretUpkeepTriggers, interpretEndStepTriggers, interpretBeginCombatTriggers, interpretNonTapAbilities, interpretLoyaltyAbilities, interpretSagaChapters, interpretDrawTriggers, interpretCounterAddedTriggers, interpretBecomesTargetTriggers, getWardCost, interpretGraveyardAbilities, interpretSacrificeTriggers, interpretLeavesTriggers, interpretLandfallTriggers, interpretTribalEtbTriggers, interpretAnyEtbTriggers, interpretDrawStepTriggers, hasLifePaymentXCost, getKickerCost, getFlashbackCost, getEscapeCost, parseClassLevels, interpretWhenYouAttackTriggers, interpretEnchantedPlayerUpkeepTriggers, interpretEnchantedPlayerAttackedTriggers, getEntersWithCounterCount, getNinjutsuCost, interpretMonstrousTriggers, getBloodthirstAmount, getFabricateAmount, getBuybackCost, getCyclingAbility, interpretCycleTriggers, getSuspendInfo, getMiracleCost, getTransmuteCost, getEntwineCost, getCounterSpellFilter, getExploitPayoffSteps, getAlternativeCosts, getModeExtraCost, getReplicateCost, getSquadCost, getOffspringCost, getCasualtyAmount, hasConspire, hasBargain, getGiftKind, getBackupAmount, getGraveyardCastCosts, getMadnessCost, getForetellCost, getPlotCost, getRecoverCost, getDredgeAmount, hasRebound, getCascadeCount, hasStorm, hasGravestorm, hasSplitSecond, hasCipher, hasEpic, hasDemonstrate, getRippleAmount, getCumulativeUpkeep, getReinforce, getForecast, getChampionType, hasReadAhead, hasForMirrodin, hasAscend, hasSoulbond, hasUmbraArmor, getFortifyCost, getFaceDownCost, interpretTurnFaceUpTriggers, interpretMutateTriggers, hasJobSelect, hasIncrement, hasParadigm, hasStartYourEngines, hasStoried, getTeamworkAmount, getMobilize, getFirebending, getReconfigureCost, hasLivingWeapon, hasLivingMetal, hasStation, getStationInfo, getDevotionRequirement, getConvertCost, getCraft, getLevelUp, interpretHauntTriggers, hasHaunt, getSpliceCost, parseCondition, parseCount, stripAbilityWords, replaceSelfNameExport, parseForEach, interpretDealtDamageTriggers, interpretUntapTriggers, interpretSecondMainTriggers, interpretBattalionTriggers, interpretNthSpellTriggers, interpretValiantTriggers, getHandAbilities, getRenew, getStriveCost, isFullyUnsupported as isFullyUnsupportedSteps, getEcho, getCaseSolve, interpretLifeGainTriggers } from './effects.js';
 import { parseManaCost, planManaPayment, totalCmc } from './mana.js';
 import { pickTargetsForKinds } from './ai.js';
@@ -348,6 +349,10 @@ function anthemAppliesTo(a, source, perm) {
 let nextId = 1;
 function uid(prefix) { return `${prefix}_${nextId++}`; }
 
+// Timestamps order continuous effects within a layer (CR 613.7).
+let NEXT_TIMESTAMP = 1;
+export function nextTimestamp() { return NEXT_TIMESTAMP++; }
+
 function makePermanent(card, controllerId) {
   const counters = {};
   // A planeswalker's loyalty is tracked as just another counter type
@@ -359,6 +364,7 @@ function makePermanent(card, controllerId) {
   if (isPlaneswalker(card)) counters.loyalty = parseInt(card.loyalty, 10) || 0;
   return {
     id: uid('perm'),
+    timestamp: nextTimestamp(),
     card,
     controllerId,
     ownerId: controllerId,
@@ -1560,6 +1566,7 @@ export class Game {
   // reads card.oracleText, so this one rewrite is all that's needed for a
   // Class's higher-level abilities to "just work" everywhere else.
   recomputeClassEffectiveOracleText(perm) {
+    this.unlayer(perm);
     const levels = parseClassLevels({ typeLine: perm.card.typeLine, oracleText: perm.classOriginalOracleText });
     const activeText = levels.filter(l => l.level <= perm.classLevel).map(l => l.standingText).filter(Boolean).join('\n');
     perm.card = { ...perm.card, oracleText: activeText };
@@ -3336,6 +3343,7 @@ export class Game {
         }
       }
       if (step.targeting === 'yourCreature' && ctx.target?.type === 'permanent') this._biteSourceId = ctx.target.id;
+      if (ctx.target?.type === 'permanent' && step.targeting !== 'none') this._lastStepTargetId = ctx.target.id;
       step.resolve(this, ctx);
     }
   }
@@ -4460,6 +4468,7 @@ export class Game {
   // in perm._dfcCard for whatever zone it goes to later).
   transformPermanent(perm) {
     if (!perm || !this.findPermanent(perm.id)) return;
+    this.unlayer(perm);
     if (perm._baseCard) { perm.card = perm._baseCard; delete perm._baseCard; }
     const original = perm._dfcCard || perm.card;
     if (!original.faces?.[1] || original.layout === 'adventure' || original.layout === 'split') return;
@@ -4574,6 +4583,7 @@ export class Game {
   }
 
   refreshCardState(perm) {
+    this.unlayer(perm);
     if (!this.tracksCardState(perm)) return;
     const base = perm._baseCard || perm.card;
     let text = base.oracleText || '';
@@ -4629,7 +4639,50 @@ export class Game {
   }
 
   refreshAllCardStates() {
-    for (const pl of this.players) for (const perm of pl.battlefield) this.refreshCardState(perm);
+    const perms = [];
+    for (const pl of this.players) for (const perm of pl.battlefield) { this.unlayer(perm); this.refreshCardState(perm); if (!perm.phasedOut) perms.push(perm); }
+    this.applyLayers(perms);
+  }
+
+  // ---------- Layers (see layers.js) ----------
+
+  // The card a permanent has before layer effects.
+  unlayer(perm) { if (perm?.card?._layerOf) perm.card = perm.card._layerOf; }
+
+  layerSentence(sentence, card) {
+    const key = sentence;
+    const memo = (this._layerMemo ||= new Map());
+    if (!memo.has(key)) memo.set(key, parseLayerSentence(sentence));
+    return memo.get(key);
+  }
+  parseConditionPublic(text) { return parseCondition(text); }
+
+  applyLayers(perms) {
+    // Fast path: nothing on the battlefield has layer text or a temporary
+    // layer effect.
+    const memo = (this._layerTextMemo ||= new WeakMap());
+    const relevant = perms.some(p => {
+      if (p.layerEffects?.length) return true;
+      let v = memo.get(p.card);
+      if (v === undefined) { v = /lose all|loses all|base power|in addition to (?:its|their) other|nonbasic lands are|enchanted (?:creature|permanent|artifact|land) is|is an? [a-z ]*(?:creature|land|artifact)\b/i.test(p.card.oracleText || ''); memo.set(p.card, v); }
+      return v;
+    });
+    if (!relevant) return;
+    const out = computeLayers(this, perms, (p) => p.card);
+    if (!out) return;
+    for (const [perm, card] of out) perm.card = card;
+  }
+
+  // A temporary layer effect from a resolving spell or ability (Turn to
+  // Frog, Merfolk Trickster) on the given permanents, until end of turn.
+  applyTemporaryLayerEffect(effect, permIds) {
+    for (const id of permIds) {
+      const perm = this.findPermanent(id);
+      if (!perm) continue;
+      (perm.layerEffects ||= []).push({ effect, timestamp: nextTimestamp() });
+      this.log(`${perm.card.name} ${effect.loseAll ? 'loses all abilities' : 'changes'}${effect.basePT && effect.basePT !== 'mv' ? ` and is ${effect.basePT.power}/${effect.basePT.toughness}` : ''} until end of turn.`);
+    }
+    this.checkStateBasedActions();
   }
 
   // Devotion: colored mana symbols among the mana costs of your permanents.
@@ -4828,6 +4881,7 @@ export class Game {
   harness(perm) {
     if (!perm || perm.harnessed || !this.findPermanent(perm.id)) return;
     perm.harnessed = true;
+    this.unlayer(perm);
     perm.card = { ...perm.card, oracleText: (perm.card.oracleText || '').replace(/^∞\s*—\s*/gm, '') };
     this.log(`${perm.card.name} is harnessed — its ∞ ability is active.`);
   }
@@ -4907,6 +4961,7 @@ export class Game {
     this.payNow(playerId, cost);
     const { card: real, kind } = perm.faceDown;
     perm.faceDown = null;
+    this.unlayer(perm);
     perm.card = real;
     this.log(`${this.getPlayer(playerId).name} turns ${real.name} face up (${cost}).`);
     if (getFaceDownCost(real)?.kind === 'megamorph') this.applyCounterAdditionEffect({ controllerId: playerId, card: real, target: { type: 'permanent', id: perm.id } }, 1, '+1/+1');
@@ -5271,6 +5326,7 @@ export class Game {
     const [a, b] = [m[1], m[2]];
     const choose = (opt) => () => {
       if (!this.findPermanent(perm.id)) return;
+      this.unlayer(perm);
       perm._modeChosen = opt;
       const printed = perm.card;
       const kept = text.split('\n').filter(l => !/^as this .* enters, choose/i.test(l)).map(l => { const bm = l.match(/^•\s*(\w+)\s*—\s*(.+)$/); return bm ? (bm[1].toLowerCase() === opt.toLowerCase() ? bm[2] : null) : l; }).filter(l => l !== null).join('\n');
@@ -5433,7 +5489,8 @@ export class Game {
   // currently copying (a Clone of a Clone copies the original). Counters,
   // auras, and temporary effects are never copied.
   copiableCard(perm) {
-    return perm.card._copiable || perm._baseCard || perm.card._printed || perm.card;
+    const card = perm.card._layerOf || perm.card;
+    return card._copiable || perm._baseCard || card._printed || card;
   }
 
   // Applies a copy effect's "except ..." clause to the copied card values.
@@ -5491,6 +5548,7 @@ export class Game {
     if (!candidates.length) return false;
     const original = perm.card;
     const doCopy = (src) => {
+      this.unlayer(perm);
       const base = this.copiableCard(src);
       let copied = this.applyCopyExceptions({ ...base }, m[4], original);
       // Spark Double: "enters with an additional +1/+1 counter on it if it's a creature".
@@ -5630,6 +5688,7 @@ export class Game {
     for (const c of [...p.hand, ...p.library.slice(0, 15)]) for (const L of Object.keys(need)) need[L] += ((c.manaCost || '').match(new RegExp(`\\{${L}\\}`, 'g')) || []).length;
     const order = Object.keys(need).filter(L => L !== banned).sort((a, b) => need[b] - need[a]);
     const choose = (L) => () => {
+      this.unlayer(perm);
       perm.chosenColor = L;
       const printed = perm.card._printed || perm.card;
       perm.card = { ...perm.card, oracleText: (perm.card.oracleText || '').replace(/one mana of the chosen colou?r/gi, `{${L}}`), _printed: printed };
@@ -5835,6 +5894,7 @@ export class Game {
   // the top card's name, types, and stats plus every card's abilities.
   // Then its "whenever this creature mutates" triggers fire.
   mergeMutate(target, card, onTop) {
+    this.unlayer(target);
     const under = target.mutateCards || [target.card];
     const cards = onTop ? [card, ...under] : [...under, card];
     const top = cards[0];
@@ -5928,6 +5988,7 @@ export class Game {
       this.log(`${p.name} amasses ${n}.`);
       return;
     } else if (type && !hasTypeWord(army.card, type)) {
+      this.unlayer(army);
       army.card = { ...army.card, typeLine: army.card.typeLine.replace(/—\s*/, `— ${typeName} `) };
     }
     if (n > 0) this.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: army.id } }, n, '+1/+1');
@@ -9458,6 +9519,9 @@ export class Game {
   detachFromLeavingBattlefield(perm) {
     // Revolt / Void: which permanents left the battlefield this turn.
     (this.permanentsLeftThisTurn ||= []).push({ controllerId: perm.controllerId, isLand: isLand(perm._baseCard || perm._dfcCard || perm.card) });
+    this.unlayer(perm);
+    perm.layerEffects = [];
+    perm.ptSwitched = false;
     // A face-down permanent is revealed as it leaves the battlefield.
     if (perm.faceDown) { perm.card = perm.faceDown.card; perm.faceDown = null; }
     if (perm.card._printed) perm.card = perm.card._printed;
@@ -9524,8 +9588,12 @@ export class Game {
     return null;
   }
 
-  effectivePower(perm) {
-    let power = parseInt(this.cdaStats(perm)?.power ?? perm.protoStats?.power ?? perm.card.power, 10) || 0;
+  // Layer 7d: "switch power and toughness" applies last.
+  effectivePower(perm) { return perm.ptSwitched ? this.unswitchedToughness(perm) : this.unswitchedPower(perm); }
+  effectiveToughness(perm) { return perm.ptSwitched ? this.unswitchedPower(perm) : this.unswitchedToughness(perm); }
+
+  unswitchedPower(perm) {
+    let power = parseInt(perm.card._ptSetByLayer ? perm.card.power : (this.cdaStats(perm)?.power ?? perm.protoStats?.power ?? perm.card.power), 10) || 0;
     power += this.auraBonus(perm, 'power');
     power += this.anthemBonus(perm, 'power');
     power += this.selfAttachmentBonus(perm, 'power');
@@ -9535,8 +9603,8 @@ export class Game {
     return power;
   }
 
-  effectiveToughness(perm) {
-    let t = parseInt(this.cdaStats(perm)?.toughness ?? perm.protoStats?.toughness ?? perm.card.toughness, 10) || 0;
+  unswitchedToughness(perm) {
+    let t = parseInt(perm.card._ptSetByLayer ? perm.card.toughness : (this.cdaStats(perm)?.toughness ?? perm.protoStats?.toughness ?? perm.card.toughness), 10) || 0;
     t += this.auraBonus(perm, 'toughness');
     t += this.anthemBonus(perm, 'toughness');
     t += this.selfAttachmentBonus(perm, 'toughness');
@@ -9628,7 +9696,9 @@ export class Game {
       for (const other of pl.battlefield) {
         if (other.attachedTo !== perm.id) continue;
         const text = (other.card.oracleText || '').toLowerCase();
-        const m = text.match(/(?:enchanted|equipped) creature (?:gets|has base power and toughness) \+?(-?\d+)\/\+?(-?\d+)/);
+        // (Base power/toughness setting — "has base power and toughness
+        // 0/4" — is layer 7b, done by the layer pass, not a bonus.)
+        const m = text.match(/(?:enchanted|equipped) creature gets \+?(-?\d+)\/\+?(-?\d+)/);
         if (m) bonus += stat === 'power' ? parseInt(m[1], 10) : parseInt(m[2], 10);
       }
     }
@@ -9652,6 +9722,19 @@ export class Game {
   }
 
   effectiveKeywords(perm) {
+    const set = this.keywordsBeforeLayerLoss(perm);
+    // Lost all abilities (Humility, Turn to Frog): keyword grants from
+    // anthems, Auras, and Equipment are gone too; what's left is what the
+    // layered card itself has, keyword counters, "until end of turn" grants,
+    // and restrictions imposed by other permanents (Pacifism's "can't block"
+    // isn't an ability of the creature).
+    if (perm.card._lostAllTs == null) return set;
+    const keep = new Set([...(perm.card.keywords || []).map(k => k.toLowerCase()), ...(perm.tempKeywords || [])]);
+    for (const [type, n] of Object.entries(perm.counters || {})) if (n > 0 && KNOWN_KEYWORDS.includes(type)) keep.add(type);
+    return new Set([...set].filter(k => keep.has(k) || keep.has(String(k).toLowerCase()) || !KNOWN_KEYWORDS.includes(String(k).toLowerCase())));
+  }
+
+  keywordsBeforeLayerLoss(perm) {
     const set = new Set(perm.card.keywords || []);
     for (const kw of perm.tempKeywords || []) set.add(kw);
     // Soulbond pair keyword grants, and city's-blessing (Ascend) conditions.
@@ -10454,6 +10537,8 @@ export class Game {
         perm.damage = 0;
         perm.tempBuffs = [];
         perm.tempKeywords = [];
+        if (perm.layerEffects?.length) perm.layerEffects = [];
+        perm.ptSwitched = false;
         // Crewed / saddled last until end of turn.
         if (perm.crewed || perm.saddled) { perm.crewed = false; perm.saddled = false; this.refreshCardState(perm); }
       }

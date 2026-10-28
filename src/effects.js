@@ -1,3 +1,4 @@
+import { parseLayerSentence } from './layers.js';
 // A lightweight interpreter for common spell and ability effects. Magic has
 // thousands of unique cards with bespoke rules text, and fully implementing
 // all of them is out of scope here — instead this recognizes the most common
@@ -842,6 +843,34 @@ function interpretEffectText(text) {
     // unsupported purely because of this prefix).
     clause = clause.replace(/^you may /, '');
     let m;
+
+    // Temporary layer effects: "Until end of turn, target creature loses all
+    // abilities and becomes a blue Frog with base power and toughness 1/1"
+    // (Turn to Frog), "It loses all abilities until end of turn" (Merfolk
+    // Trickster — "it" is the previous step's target), "each creature
+    // target player controls ..." (Polymorphist's Jest).
+    if (/lose all abilities|loses all abilities|base power and toughness|becomes? an? [a-z ]+ with base/.test(clause)) {
+      const le = parseLayerSentence(clause);
+      if (le && (le.subject.target || le.subject.targetPlayer) && le.untilEot) {
+        const isIt = /^(?:until end of turn, )?it\b/.test(clause);
+        steps.push({ kind: 'layer', targeting: isIt ? 'none' : le.subject.targetPlayer ? 'player' : 'creature', resolve: (game, ctx) => {
+          if (le.subject.targetPlayer) { const pid = ctx.target?.id || game.opponentOf(ctx.controllerId).id; game.applyTemporaryLayerEffect(le, game.getPlayer(pid).battlefield.filter(x => game.isCreature(x.card)).map(x => x.id)); return; }
+          const id = isIt ? game._lastStepTargetId : ctx.target?.id;
+          if (id) game.applyTemporaryLayerEffect(le, [id]);
+        } });
+        continue;
+      }
+    }
+    // "Switch target creature's power and toughness until end of turn"
+    // (Twisted Image, Inside Out) — layer 7d.
+    if (/^switch (?:target creature'?s|its|this creature'?s) power and toughness until end of turn$/.test(clause)) {
+      const self = /^switch (?:its|this creature'?s)/.test(clause);
+      steps.push({ kind: 'layer', targeting: self ? 'none' : 'creature', resolve: (game, ctx) => {
+        const perm = game.findPermanent(self ? ctx.sourcePerm?.id : ctx.target?.id);
+        if (perm) { perm.ptSwitched = !perm.ptSwitched; game.log(`${perm.card.name}'s power and toughness are switched until end of turn.`); game.checkStateBasedActions(); }
+      } });
+      continue;
+    }
 
     // "Destroy target creature if it has mana value 2 or less" (Fatal Push)
     // — a condition on the target itself.
@@ -3621,6 +3650,12 @@ function interpretEffectText(text) {
       const amount = parseAmount(m[1]);
       steps.push({ kind: 'scry', targeting: 'none', resolve: (game, ctx) => game.applyLookAndSort(ctx, amount, 'graveyard') });
       continue;
+    }
+    // Static layer abilities (Humility, Blood Moon, Ensoul Artifact) are
+    // applied continuously by game.js's layer pass.
+    if (/lose all abilities|loses all abilities|base power and toughness|in addition to (?:its|their) other|^nonbasic lands are/.test(clause)) {
+      const le = parseLayerSentence(clause);
+      if (le && !le.subject.target && !le.subject.targetPlayer) { steps.push({ kind: 'static', targeting: 'none', resolve: () => {} }); continue; }
     }
     // Additional sacrifice/discard costs are paid on casting (game.js).
     if (/^as an additional cost to cast this spell, (?:sacrifice an? [a-z ]+|discard (?:a|two) cards?|exile an? [a-z ]*card from your graveyard)$/.test(clause)) continue;
