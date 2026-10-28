@@ -1104,6 +1104,7 @@ function renderStack() {
 }
 
 function isLegalStackTarget(item) {
+  if (currentTargetKind() === 'copySpell') return /\b(instant|sorcery)\b/i.test(item.card.typeLine || '');
   if (currentTargetKind() !== 'stackSpell') return false;
   const source = ui.targeting?.card;
   return source ? game.canCounterTarget(item, source) : item.controllerId !== HUMAN_ID;
@@ -1256,7 +1257,7 @@ function renderTargetingBanner() {
     banner.hidden = false;
     const remaining = ui.targeting.kinds.length - ui.targeting.collected.length;
     const kind = ui.targeting.kinds[ui.targeting.collected.length];
-    const where = kind === 'stackSpell' ? 'a highlighted spell on the stack' : 'a highlighted card or life total';
+    const where = (kind === 'stackSpell' || kind === 'copySpell') ? 'a highlighted spell on the stack' : 'a highlighted card or life total';
     banner.textContent = `Choose a target for ${ui.targeting.card.name} (${remaining} remaining) — click ${where}`;
     return;
   }
@@ -1269,7 +1270,7 @@ function renderTargetingBanner() {
     banner.hidden = false;
     const remaining = game.pendingRequest.kinds.length - game.pendingRequest.collected.length;
     const kind = game.pendingRequest.kinds[game.pendingRequest.collected.length];
-    const where = kind === 'stackSpell' ? 'a highlighted spell on the stack' : 'a highlighted card or life total';
+    const where = (kind === 'stackSpell' || kind === 'copySpell') ? 'a highlighted spell on the stack' : 'a highlighted card or life total';
     banner.textContent = `Choose a target for ${game.pendingRequest.cardName}'s ability (${remaining} remaining) — click ${where}`;
     return;
   }
@@ -1463,7 +1464,7 @@ async function handleHandCardClick(card, { skipCycleChoice = false, altCost = nu
   const extras = altCost ? {} : await chooseCastExtras(card, modeIndexes);
   if (extras && extras.teamwork && modal?.teamworkBoth) modeIndexes = modal.modes.map((_, i) => i);
   if (extras === null) return;
-  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain, overload: altCost?.kind === 'overload', teamwork: !!extras.teamwork, bestow: altCost?.kind === 'bestow' });
+  const kinds = game.getRequiredTargetKinds(card, modeIndexes, { gift: !!extras.gift, bargained: !!extras.bargain, overload: altCost?.kind === 'overload', teamwork: !!extras.teamwork, bestow: altCost?.kind === 'bestow', cleave: altCost?.kind === 'cleave' });
   let xValue = 0;
   const parsed = parseManaCost(card.manaCost);
   if (parsed.x > 0) {

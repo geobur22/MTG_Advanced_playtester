@@ -306,6 +306,13 @@ export function pickTargetsForKinds(game, card, controllerId, kinds, excludeId =
       else targets.push(null);
       continue;
     }
+    if (kind === 'copySpell') {
+      // Copy our own topmost instant/sorcery, else the opponent's.
+      const spells = game.stack.filter(x => /\b(instant|sorcery)\b/i.test(x.card.typeLine || '') && x.card !== card);
+      const pick = spells.filter(x => x.controllerId === controllerId).pop() || spells.pop();
+      targets.push(pick ? { type: 'stack', id: pick.id } : null);
+      continue;
+    }
     if (kind === 'stackSpell') {
       // The topmost OPPONENT's spell this counterspell can legally counter
       // (any spell type — permanents included — subject to its own filter).
@@ -343,6 +350,11 @@ function chooseCastWay(game, p, card) {
   // Bestow: onto our best creature when we have one (it stays a creature
   // if that creature dies).
   if (options.some(o => o.kind === 'bestow') && p.battlefield.some(x => isCreature(game, x.card))) return { altCost: { kind: 'bestow' } };
+  // Cleave: the full-text version whenever it's affordable. Offering: when
+  // the normal cost isn't, sacrificing the weakest creature of the type.
+  if (options.some(o => o.kind === 'cleave')) return { altCost: { kind: 'cleave' } };
+  const offering = options.filter(o => o.kind === 'offering').sort((a, b) => game.effectivePower(game.findPermanent(a.emergeVictimId)) - game.effectivePower(game.findPermanent(b.emergeVictimId)))[0];
+  if (offering && !normal) return { altCost: { kind: 'offering', emergeVictimId: offering.emergeVictimId } };
   // Awaken: the bigger version whenever it's affordable.
   if (options.some(o => o.kind === 'awaken')) return { altCost: { kind: 'awaken' } };
   // Overload: worth it when the sweep hits more of the opponent's
@@ -603,7 +615,7 @@ export function takeAITurnAction(game) {
       const kicked = game.getEntwineCost(card) ? entwine : game.canAffordKicked(p.id, card);
       const gift = !altCost && shouldPromiseGift(game, card);
       const bargainFodder = game.hasBargain(card) ? game.bargainCandidates(p.id).find(x => isTokenFodder(game, x)) : null;
-      const flags = { kicked, gift, bargained: !!bargainFodder, overload: altCost?.kind === 'overload', teamwork: useTeamwork, bestow: altCost?.kind === 'bestow' };
+      const flags = { kicked, gift, bargained: !!bargainFodder, overload: altCost?.kind === 'overload', teamwork: useTeamwork, bestow: altCost?.kind === 'bestow', cleave: altCost?.kind === 'cleave' };
       // An {X} spell cast at a hardcoded X=0 achieves nothing (Comet Storm-
       // style payoffs are the whole point of the card) — spend as much as
       // can actually be afforded instead, and skip the card entirely rather

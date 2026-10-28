@@ -670,6 +670,87 @@ function interpretEffectText(text) {
     text = text.slice(0, revealMatch.index) + text.slice(revealMatch.index + revealMatch[0].length);
   }
 
+  // "Reveal the top N cards of your library. You may put a land card from
+  // among them into your hand. Put the rest into your graveyard." (Satyr
+  // Wayfinder, Grisly Salvage) and "... Put all land cards revealed this
+  // way into your hand and the rest into your graveyard." (Mulch).
+  const revealPick = text.match(/reveal the top (\w+) cards of your library\. (?:you may put an? ([\w ,]+?) card from among them into your hand\. put the rest into your graveyard|put all ([\w ]+?) cards revealed this way into your hand and the rest into your graveyard)\.?/);
+  if (revealPick) {
+    const n = parseAmount(revealPick[1]);
+    const types = (revealPick[2] || revealPick[3]).split(/,?\s+or\s+|,\s*/).map(w => w.trim().replace(/s$/, '')).filter(Boolean);
+    const all = !!revealPick[3];
+    steps.push({ kind: 'mill', targeting: 'none', resolve: (game, ctx) => game.applyRevealPick(ctx, n, types, all) });
+    text = text.replace(revealPick[0], '');
+  }
+  // Delver of Secrets: "look at the top card of your library. You may
+  // reveal that card. If an instant or sorcery card is revealed this way,
+  // transform this creature."
+  const delver = text.match(/look at the top card of your library\. you may reveal that card\. if an? ([\w ]+?) card is revealed this way, transform this creature\.?/);
+  if (delver) {
+    const types = delver[1].split(/\s+or\s+/).map(w => w.trim());
+    steps.push({ kind: 'transform', targeting: 'none', resolve: (game, ctx) => {
+      const top = game.getPlayer(ctx.controllerId).library[0];
+      if (top && types.some(t => (top.typeLine || '').toLowerCase().includes(t))) { game.log(`${ctx.card.name} reveals ${top.name}.`); game.transformPermanent(ctx.sourcePerm); }
+    } });
+    text = text.replace(delver[0], '');
+  }
+  // "You may discard up to two cards. If you do, draw that many cards."
+  // (Fable of the Mirror-Breaker chapter II)
+  const rummageUpTo = text.match(/(?:you may )?discard up to (\w+) cards\. if you do, draw that many cards\.?/);
+  if (rummageUpTo) {
+    const n = parseAmount(rummageUpTo[1]);
+    steps.push({ kind: 'discard', targeting: 'none', resolve: (game, ctx) => game.applyRummageUpTo(ctx, n) });
+    text = text.replace(rummageUpTo[0], '');
+  }
+  // "You may pay {B}. If you do, EFFECT" (Nihil Spellbomb) — the AI pays
+  // when it can; a human is asked.
+  const mayPay = text.match(/you may pay ((?:\{[^}]+\})+)\. if you do, ([^.]+)\.?/);
+  if (mayPay) {
+    const cost = mayPay[1]; const inner = interpretEffectText(mayPay[2]);
+    if (!isFullyUnsupported(inner)) {
+      steps.push({ kind: 'optionalPay', targeting: 'none', resolve: (game, ctx) => game.offerPayFor(ctx, cost, inner) });
+      text = text.replace(mayPay[0], '');
+    }
+  }
+  // Named attacking tokens: "create Ragavan, a legendary 2/1 red Monkey
+  // creature token. Ragavan enters tapped and attacking. Exile that token
+  // at end of combat." (Kari Zev)
+  const named = text.match(/create ([\w' ,-]+?), a (legendary )?(\d+)\/(\d+) ([\w ]+?) creature token(?: with ([^.]+?))?\.(?: [\w' -]+? enters tapped and attacking\.)?(?: exile that token at end of combat\.)?/);
+  if (named) {
+    const [, tokenName, legendary, pw, tg, typeDesc, kwText] = named;
+    const attacking = /enters tapped and attacking/.test(named[0]);
+    const exileEoc = /exile that token at end of combat/.test(named[0]);
+    steps.push({ kind: 'token', targeting: 'none', resolve: (game, ctx) => game.createNamedToken(ctx, { name: tokenName, legendary: !!legendary, power: +pw, toughness: +tg, typeDesc, keywordText: kwText || null, attacking, exileAtEndOfCombat: exileEoc }) });
+    text = text.replace(named[0], '');
+  }
+  // Orzhov Advokist's upkeep deal.
+  const advokist = text.match(/each player may put two \+1\/\+1 counters on a creature they control\. if a player does, creatures that player controls can'?t attack you or planeswalkers you control until your next turn\.?/);
+  if (advokist) {
+    steps.push({ kind: 'counters', targeting: 'none', resolve: (game, ctx) => game.applyAdvokist(ctx) });
+    text = text.replace(advokist[0], '');
+  }
+  // Nissa, Sage Animist +1: "Reveal the top card of your library. If it's a
+  // land card, put it onto the battlefield. Otherwise, put it into your hand."
+  const revealLand = text.match(/reveal the top card of your library\. if it'?s a land card, put it onto the battlefield\. otherwise, put it into your hand\.?/);
+  if (revealLand) {
+    steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => {
+      const p = game.getPlayer(ctx.controllerId); const c = p.library.shift(); if (!c) return;
+      game.log(`${ctx.card.name} reveals ${c.name}.`);
+      if (game.isLand(c)) game.putCardOntoBattlefield(c, p.id); else p.hand.push(c);
+    } });
+    text = text.replace(revealLand[0], '');
+  }
+  // Wheels: "each player discards their hand, then draws seven cards".
+  const wheel = text.match(/each player discards their hand,? then draws (\w+) cards\.?/);
+  if (wheel) {
+    const n = parseAmount(wheel[1]);
+    steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => game.applyWheel(ctx, n) });
+    text = text.replace(wheel[0], '');
+  }
+  // Palace Siege-style modal permanents: the "• Khans — ..." mode lines are
+  // handled by game.js once a mode is chosen; drop them here.
+  text = text.replace(/^•\s*[a-z]+\s*—[^\n]*$/gm, '');
+
   // Kinship: "You may look at the top card of your library. If it shares a
   // creature type with this creature, you may reveal it. If you do, EFFECT."
   const kinship = text.match(/(?:you may )?look at the top card of your library\. if it shares a creature type with this creature, you may reveal it\. if you do, ([^.]+)\.?/);
@@ -1312,7 +1393,7 @@ function interpretEffectText(text) {
       steps.push({ kind: 'transform', targeting: 'none', resolve: (game, ctx) => game.transformPermanent(ctx.sourcePerm) });
       continue;
     }
-    if (/^exile (?:this (?:saga|creature|permanent|enchantment|artifact)|it),? then return it to the battlefield transformed under (?:your|its owner's) control$/.test(clause)) {
+    if (/^exile (?:this (?:saga|creature|permanent|enchantment|artifact)|it|[a-z]+),? then return (?:it|her|him|them) to the battlefield transformed under (?:your|its owner's|her owner's|his owner's|their owner's) control$/.test(clause)) {
       steps.push({ kind: 'transform', targeting: 'none', resolve: (game, ctx) => game.exileAndReturnTransformed(ctx.sourcePerm) });
       continue;
     }
@@ -1386,6 +1467,190 @@ function interpretEffectText(text) {
     if ((m = clause.match(/^(?:it|this creature|this spell|[\w',\s]+?) deals damage equal to (.+?) to (target [\w\s]+?|any target)$/)) && parseCount(m[1])) {
       const count = parseCount(m[1]);
       steps.push({ kind: 'damage', targeting: describeTargetKind(m[2]), resolve: (game, ctx) => game.applyDamageEffect(ctx, count(game, ctx)) });
+      continue;
+    }
+
+    // Prized Amalgam's own trigger is handled by game.js (it fires from the
+    // graveyard), so its text is a no-op here.
+    if (/^whenever a creature enters, if it entered from your graveyard or you cast it from your graveyard, return this (?:card|creature) from your graveyard to the battlefield tapped at the beginning of the next end step$/.test(clause)) {
+      steps.push({ kind: 'static', targeting: 'none', resolve: () => {} });
+      continue;
+    }
+    // Tasha's Hideous Laughter.
+    if ((m = clause.match(/^each opponent exiles cards from the top of their library until that player has exiled cards with total mana value (\d+) or greater$/))) {
+      const total = parseInt(m[1], 10);
+      steps.push({ kind: 'mill', targeting: 'none', resolve: (game, ctx) => {
+        const opp = game.opponentOf(ctx.controllerId); let sum = 0, k = 0;
+        while (sum < total && opp.library.length) { const c = opp.library.shift(); opp.exile.push(c); sum += c.cmc || 0; k++; }
+        game.log(`${opp.name} exiles ${k} card${k === 1 ? '' : 's'} (total mana value ${sum}).`);
+      } });
+      continue;
+    }
+    // Yorion: "exile any number of other nonland permanents you own and
+    // control. Return those cards to the battlefield at the beginning of the
+    // next end step." The AI blinks its permanents with enters triggers.
+    if (/^exile any number of other nonland permanents you own and control$/.test(clause)) {
+      steps.push({ kind: 'blink', targeting: 'none', resolve: (game, ctx) => game.applyDelayedBlinkOwn(ctx) });
+      continue;
+    }
+    if (/^return those cards to the battlefield at the beginning of the next end step$/.test(clause)) continue;
+    // "Copy target instant or sorcery spell [, activated ability, or
+    // triggered ability]. You may choose new targets for the copy."
+    if (/^copy target (?:instant (?:or sorcery )?spell|instant spell, sorcery spell(?:, activated ability, or triggered ability)?|instant or sorcery spell you control)$/.test(clause)) {
+      steps.push({ kind: 'copy', targeting: 'copySpell', resolve: (game, ctx) => {
+        const item = game.stack.find(x => x.id === ctx.target?.id);
+        if (item) game.putCopyOnStack(item.card, ctx.controllerId, { why: ctx.card.name, xValue: item.xValue });
+      } });
+      continue;
+    }
+    if (/^you may choose new targets for the copy$/.test(clause)) continue;
+    // "Change the target of target spell or ability with a single target"
+    // (Return the Favor) — the new target is whatever the caster would pick
+    // if the spell were theirs.
+    if (/^change the target of target spell(?: or ability)? with a single target$/.test(clause)) {
+      steps.push({ kind: 'redirect', targeting: 'stackSpell', resolve: (game, ctx) => game.applyRedirectSpell(ctx) });
+      continue;
+    }
+    // "Gain control of target creature [or planeswalker] for as long as you
+    // control this creature" (Dragonlord Silumgar) / permanently.
+    if ((m = clause.match(/^gain control of target ((?:creature|artifact|enchantment|planeswalker|permanent|land)(?: or (?:creature|artifact|enchantment|planeswalker))?)( for as long as you control this (?:creature|permanent|artifact|enchantment))?$/))) {
+      const desc = m[1]; const linked = !!m[2];
+      steps.push({ kind: 'control', targeting: describeTargetKind(desc), resolve: (game, ctx) => game.applyStealEffect(ctx, { linked }) });
+      continue;
+    }
+    // Hellkite Tyrant: "gain control of all artifacts that player controls".
+    if (/^gain control of all artifacts that player controls$/.test(clause)) {
+      steps.push({ kind: 'control', targeting: 'none', resolve: (game, ctx) => {
+        const victim = game.getPlayer(ctx.damagedPlayerId) || game.opponentOf(ctx.controllerId);
+        for (const perm of victim.battlefield.filter(x => game.hasTypeWordPublic(x.card, 'artifact'))) game.applyStealEffect({ ...ctx, target: { type: 'permanent', id: perm.id } }, {});
+      } });
+      continue;
+    }
+    // "Create a number of 2/2 white Knight creature tokens with vigilance
+    // equal to the number of opponents you have" (and other counts).
+    if ((m = clause.match(/^create a number of (\d+)\/(\d+) ([\w\s]+?) creature tokens(?: with ([\w\s,]+?))? equal to (.+)$/))) {
+      const [, pw, tg, typeDesc, kw, countText] = m;
+      const count = /^the number of opponents you have$/.test(countText) ? (() => 1) : parseCount(countText);
+      if (count) {
+        steps.push({ kind: 'token', targeting: 'none', resolve: (game, ctx) => { const n = count(game, ctx); if (n > 0) game.applyTokenEffect(ctx, n, +pw, +tg, typeDesc, kw || null); } });
+        continue;
+      }
+    }
+    // "You win the game" (Revel in Riches, after its condition).
+    if (/^you win the game$/.test(clause)) {
+      steps.push({ kind: 'win', targeting: 'none', resolve: (game, ctx) => game.loseGame(game.opponentOf(ctx.controllerId).id, `${ctx.card.name}`) });
+      continue;
+    }
+    // "Double the number of +1/+1 counters on each creature you control"
+    // (Kalonian Hydra) / "on this creature".
+    if ((m = clause.match(/^double the number of \+1\/\+1 counters on (each creature you control|this creature|target creature)$/))) {
+      const scope = m[1];
+      steps.push({ kind: 'counters', targeting: scope === 'target creature' ? 'creature' : 'none', resolve: (game, ctx) => {
+        const perms = scope === 'each creature you control' ? game.getPlayer(ctx.controllerId).battlefield.filter(x => game.isCreature(x.card))
+          : [scope === 'this creature' ? ctx.sourcePerm : game.findPermanent(ctx.target?.id)].filter(Boolean);
+        for (const x of perms) { const n = x.counters['+1/+1'] || 0; if (n > 0) game.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: x.id } }, n, '+1/+1'); }
+      } });
+      continue;
+    }
+    // "Each other creature you control gets +X/+X until end of turn" (X set
+    // by a "where X is ..." count — Wild Beastmaster).
+    if ((m = clause.match(/^(each other|each) creatures? you control gets? \+x\/\+x until end of turn$/))) {
+      const excludeSelf = m[1] === 'each other';
+      steps.push({ kind: 'pump', targeting: 'none', resolve: (game, ctx) => game.applyMassPumpEffect(ctx, 'you', ctx.xValue || 0, ctx.xValue || 0, { excludeSelf }) });
+      continue;
+    }
+    // "Search your library for up to two basic land cards and/or Gate cards
+    // / Forest cards, put them onto the battlefield [tapped], then shuffle."
+    if ((m = clause.match(/^search your library for up to (\w+) ([\w\s/,-]+?) cards?,? put (?:them|those cards) onto the battlefield( tapped)?,? then shuffle$/))) {
+      const n = parseAmount(m[1]); const words = m[2]; const tapped = !!m[3];
+      steps.push({ kind: 'tutor', targeting: 'none', resolve: (game, ctx) => game.applyMultiTutor(ctx, n, words, 'battlefield', tapped) });
+      continue;
+    }
+    // "Search your library for up to three creature cards, reveal them, then
+    // shuffle and put those cards on top in any order." (Congregation at Dawn)
+    if ((m = clause.match(/^search your library for up to (\w+) ([\w\s/,-]+?) cards?, reveal them, then shuffle and put those cards on top(?: in any order)?$/))) {
+      const n = parseAmount(m[1]); const words = m[2];
+      steps.push({ kind: 'tutor', targeting: 'none', resolve: (game, ctx) => game.applyMultiTutor(ctx, n, words, 'top', false) });
+      continue;
+    }
+    // Sepulchral Primordial: "for each opponent, you may put up to one
+    // target creature card from that player's graveyard onto the battlefield
+    // under your control".
+    if (/^for each opponent, (?:you may )?put up to one target creature card from that player'?s graveyard onto the battlefield under your control$/.test(clause)) {
+      steps.push({ kind: 'reanimate', targeting: 'none', resolve: (game, ctx) => game.applyReanimateFromOpponentGraveyard(ctx) });
+      continue;
+    }
+    // Karrthus: "gain control of all Dragons, then untap all Dragons".
+    if ((m = clause.match(/^gain control of all ([a-z]+?)s?, then untap all \1s?$/))) {
+      const type = m[1];
+      steps.push({ kind: 'control', targeting: 'none', resolve: (game, ctx) => game.applyGainControlOfAll(ctx, type, true) });
+      continue;
+    }
+    // "It deals an amount of damage of your choice to you and target
+    // creature" (Volcano Hellion) — the AI picks exactly the creature's
+    // remaining toughness (if it can afford the life).
+    if (/^(?:it|this creature) deals an amount of damage of your choice to you and target creature$/.test(clause)) {
+      steps.push({ kind: 'damage', targeting: 'creature', resolve: (game, ctx) => game.applyChosenDamageToYouAndTarget(ctx) });
+      continue;
+    }
+    if (/^the damage can'?t be prevented$|^damage can'?t be prevented this turn$/.test(clause)) continue;
+    // "This creature deals 2 damage to that spell's controller" (Bonecrusher
+    // Giant's becomes-the-target trigger).
+    if ((m = clause.match(/^(?:this creature|it) deals (\d+) damage to that spell'?s controller$/))) {
+      const n = parseInt(m[1], 10);
+      steps.push({ kind: 'damage', targeting: 'none', resolve: (game, ctx) => { if (ctx.spellControllerId) game.applyDamageEffect({ ...ctx, target: { type: 'player', id: ctx.spellControllerId } }, n); } });
+      continue;
+    }
+    // Self-Destruct: "target creature you control deals X damage to any
+    // other target and X damage to itself" (X = its power).
+    if (/^target creature you control deals x damage to any other target and x damage to itself$/.test(clause)) {
+      steps.push({ kind: 'biteSource', targeting: 'yourCreature', resolve: (game, ctx) => { game._biteSourceId = ctx.target?.id || null; } });
+      steps.push({ kind: 'damage', targeting: 'creatureOrPlayer', resolve: (game, ctx) => {
+        const src = game.findPermanent(game._biteSourceId); if (!src) return;
+        const x = game.effectivePower(src);
+        game.applyDamageEffect({ ...ctx, card: src.card, sourcePerm: src }, x);
+        game.applyDamageEffect({ ...ctx, card: src.card, sourcePerm: src, target: { type: 'permanent', id: src.id } }, x);
+      } });
+      continue;
+    }
+    // Divided damage: "deals 2 damage divided as you choose among one or two
+    // targets" (Fire, Chandra's Pyrohelix) / "X damage ... among any number
+    // of targets" (Aurelia's Fury, which also taps creatures it damages).
+    if ((m = clause.match(/deals (\d+|x) damage divided as you choose among (one or two|any number of) targets$/))) {
+      const amountToken = m[1]; const count = m[2] === 'one or two' ? 2 : 3;
+      steps.push({ kind: 'damage', targeting: 'creatureOrPlayer', targetCount: count, minTargets: 1, resolve: (game, ctx) => game.applyDividedDamage(ctx, resolveAmount(amountToken, ctx)) });
+      continue;
+    }
+    if (/^tap each creature dealt damage this way$/.test(clause)) {
+      steps.push({ kind: 'tap', targeting: 'none', resolve: (game) => { for (const id of game._lastDividedDamaged || []) { const x = game.findPermanent(id); if (x && game.isCreature(x.card)) x.tapped = true; } } });
+      continue;
+    }
+    // Hunter's Insight: "Choose target creature you control. Whenever that
+    // creature deals combat damage to a player or planeswalker this turn,
+    // draw that many cards."
+    if (/^choose target creature you control$/.test(clause)) {
+      steps.push({ kind: 'choose', targeting: 'yourCreature', resolve: (game, ctx) => { game._chosenCreatureId = ctx.target?.id || null; } });
+      continue;
+    }
+    if (/^whenever that creature deals combat damage to a player(?: or planeswalker)? this turn, draw that many cards$/.test(clause)) {
+      steps.push({ kind: 'delayed', targeting: 'none', resolve: (game) => { const x = game.findPermanent(game._chosenCreatureId); if (x) x.drawOnCombatDamageTurn = game.turnNumber; } });
+      continue;
+    }
+    // Kumano Faces Kakkazan II: "When you next cast a creature spell this
+    // turn, that creature enters with an additional +1/+1 counter on it."
+    if (/^when you next cast a creature spell this turn, that creature enters with an additional \+1\/\+1 counter on it$/.test(clause)) {
+      steps.push({ kind: 'delayed', targeting: 'none', resolve: (game, ctx) => { game.getPlayer(ctx.controllerId).nextCreatureExtraCounter = game.turnNumber; } });
+      continue;
+    }
+    // Bloodthirsty Adversary: "you may pay {2}{R} any number of times. When
+    // you pay this cost one or more times, put that many +1/+1 counters on
+    // this creature, then exile up to that many target instant and/or
+    // sorcery cards with mana value 3 or less from your graveyard and copy
+    // them. You may cast any number of the copies without paying their mana
+    // costs."
+    if ((m = clause.match(/^(?:you may )?pay ((?:\{[^}]+\})+) any number of times$/))) {
+      const cost = m[1];
+      steps.push({ kind: 'payRepeat', targeting: 'none', resolve: (game, ctx) => game.applyPayAnyNumberOfTimes(ctx, cost) });
       continue;
     }
 
@@ -2537,6 +2802,12 @@ function interpretEffectText(text) {
     // (and always failing) to find a LAND named "artifact".
     if ((m = clause.match(/^search your library for an? ([\w\s]+?) card(?: with mana value x or less)?,? put (?:it|that card) onto the battlefield,?(?: then shuffle)?$/))) {
       const typeWord = m[1].trim().toLowerCase();
+      // "a Dragon permanent card" (Dragonstorm): any permanent with that subtype.
+      if (/^[a-z]+ permanent$/.test(typeWord)) {
+        const sub = typeWord.replace(/ permanent$/, '');
+        steps.push({ kind: 'tutorToBattlefield', targeting: 'none', resolve: (game, ctx) => game.applyTutorToBattlefieldEffect(ctx, sub, Infinity) });
+        continue;
+      }
       if (['artifact', 'creature', 'instant', 'sorcery', 'enchantment', 'equipment', 'aura', 'vehicle', 'planeswalker', 'battle', 'land'].includes(typeWord)) {
         steps.push({
           kind: 'tutorToBattlefield',
@@ -2569,7 +2840,7 @@ function interpretEffectText(text) {
       // type line, so Farseek silently found nothing even in a deck full of
       // Mountains. Normalizing any ", or "/" or " to a plain ", " first
       // sidesteps the ambiguity entirely, for lists of any length.
-      const landTypes = m[2] === 'land' ? null : m[2].replace(/,?\s+or\s+/g, ', ').split(/,\s*/).filter(Boolean);
+      const landTypes = m[2] === 'land' ? (/land card with a basic land type/.test(clause) ? ['plains', 'island', 'swamp', 'mountain', 'forest'] : null) : m[2].replace(/,?\s+or\s+/g, ', ').split(/,\s*/).filter(Boolean);
       steps.push({
         kind: 'fetchLand',
         targeting: 'none',
@@ -2788,14 +3059,15 @@ function interpretEffectText(text) {
     // Same "no real which-card UI" simplification as the untargeted
     // versions: auto-picks the highest-CMC qualifying card.
     // (Also "up to N target creature cards" — Proclamation of Rebirth.)
-    if ((m = clause.match(/^return (?:up to (two|three|four|\d+) )?target (creature|permanent) cards?(?: with mana value (\d+) or less)? from your graveyard to the battlefield$/))) {
+    if ((m = clause.match(/^(?:you may )?return (?:up to (two|three|four|\d+) )?target (creature|permanent|artifact|enchantment|artifact or creature) cards?(?: with (mana value|power) (\d+) or less)? from your graveyard to the battlefield$/))) {
       const count = m[1] ? parseAmount(m[1]) : 1;
       const typeWord = m[2];
-      const maxCmc = m[3] ? parseInt(m[3], 10) : Infinity;
+      const maxCmc = m[3] === 'mana value' ? parseInt(m[4], 10) : Infinity;
+      const maxPower = m[3] === 'power' ? parseInt(m[4], 10) : Infinity;
       steps.push({
         kind: 'reanimate',
         targeting: 'none',
-        resolve: (game, ctx) => { for (let i = 0; i < count; i++) game.applyReanimateFromOwnGraveyardEffect(ctx, { typeWord, maxCmc }); },
+        resolve: (game, ctx) => { for (let i = 0; i < count; i++) game.applyReanimateFromOwnGraveyardEffect(ctx, { typeWord, maxCmc, maxPower }); },
       });
       continue;
     }
@@ -3124,13 +3396,13 @@ function interpretEffectText(text) {
     // card", ...) ahead of the bare "card", defaulting to any nonland card
     // when no restriction is given.
     // Also "up to N target ... cards" (Life from the Loam's three lands).
-    if ((m = clause.match(/return (?:up to (two|three|four|\d+) )?target (?:([\w\s]+?) )?cards? from (?:your|a|target player's) graveyard to (?:your|its owner's|their owner's) hand/))) {
+    if ((m = clause.match(/return (?:up to (two|three|four|\d+) )?(?:another )?target (?:([\w\s]+?) )?cards? from (?:your|a|target player's) graveyard to (?:your|its owner's|their owner's) hand/))) {
       const count = m[1] ? parseAmount(m[1]) : 1;
       const typeWords = m[2] ? m[2].trim().toLowerCase().split(/\s+or\s+/).map(w => w.replace(/s$/, '')) : null;
       steps.push({
         kind: 'regrowth',
         targeting: 'none',
-        resolve: (game, ctx) => { for (let i = 0; i < count; i++) game.applyRegrowthEffect(ctx, typeWords); },
+        resolve: (game, ctx) => { for (let i = 0; i < count; i++) game.applyRegrowthEffect(ctx, typeWords, { excludeSelf: /another target/.test(clause) }); },
       });
       continue;
     }
@@ -3268,8 +3540,20 @@ function interpretEffectText(text) {
       steps.push({
         kind: 'scry',
         targeting: 'none',
-        resolve: (game, ctx) => game.log(`${ctx.card.name} scries ${amount}.`),
+        resolve: (game, ctx) => game.applyLookAndSort(ctx, amount, 'bottom'),
       });
+      continue;
+    }
+    // Surveil N: look at the top N; any number go to the graveyard.
+    if ((m = clause.match(/^surveil (\d+|a|an|one|two|three|four)$/))) {
+      const amount = parseAmount(m[1]);
+      steps.push({ kind: 'scry', targeting: 'none', resolve: (game, ctx) => game.applyLookAndSort(ctx, amount, 'graveyard') });
+      continue;
+    }
+    // Prized Amalgam / Fraying Sanity: handled by game.js at the end step.
+    if (/^(?:if it entered from your graveyard or you cast it from your graveyard, )?return this (?:card|creature) from your graveyard to the battlefield tapped at the beginning of the next end step$/.test(clause)
+      || /^enchanted player mills x cards, where x is the number of cards put into their graveyard from anywhere this turn$/.test(clause)) {
+      steps.push({ kind: 'static', targeting: 'none', resolve: () => {} });
       continue;
     }
 
@@ -3395,7 +3679,13 @@ function interpretEffectText(text) {
     // — without this, the keyword was silently dropped: the clause still
     // matched and created the token, just as a vanilla creature, with no
     // "isn't modeled" log line to reveal the loss.
-    if ((m = clause.match(/create (a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+) (\d+)\/(\d+) ([\w\s]+?) creature tokens?(?: with ([\w\s,]+))?/))) {
+    if ((m = clause.match(/create (a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\d+) (\d+)\/(\d+) ([\w\s]+?) creature tokens?(?: with ([\w\s,]+))?/))) {
+      const amountToken = m[1];
+      if (amountToken === 'x') {
+        const power = parseInt(m[2], 10), toughness = parseInt(m[3], 10), typeDesc = m[4].trim(), keywordText = m[5] || null;
+        steps.push({ kind: 'token', targeting: 'none', resolve: (game, ctx) => { const n = ctx.xValue || 0; if (n > 0) game.applyTokenEffect(ctx, n, power, toughness, typeDesc, keywordText); } });
+        continue;
+      }
       const amount = parseAmount(m[1]);
       const power = parseInt(m[2], 10), toughness = parseInt(m[3], 10);
       const typeDesc = m[4].trim();
@@ -3670,6 +3960,9 @@ export function applyCastConditions(text, flags = {}) {
 export function interpretSpell(card, modeIndexes = null, flags = null) {
   if (flags) {
     let rewritten = applyCastConditions(card.oracleText || '', flags);
+    // Cleave: cast for the cleave cost, the [bracketed] words are removed;
+    // otherwise the brackets are just punctuation.
+    rewritten = flags.cleave ? rewritten.replace(/\s*\[[^\]]*\]/g, '') : rewritten.replace(/[\[\]]/g, '');
     // Overload: "change 'target' in its text to 'each'" (rules text only —
     // the reminder and the Overload line itself are dropped first).
     if (flags.overload) rewritten = rewritten.split('\n').filter(l => !/^overload\b/i.test(l.trim())).join('\n').replace(/\([^()]*\)/g, '').replace(/\btarget\b/gi, 'each');
@@ -4175,7 +4468,7 @@ export function interpretDiesTriggers(card) {
   for (const line of lines) {
     const m = line.match(/^when(?:ever)?\s+(.+?)\s+(?:dies|is put into a graveyard from the battlefield),\s*(.+)$/);
     if (!m) continue;
-    triggers.push({ scope: classifyOwnerScope(m[1]), dyingType: classifyDyingType(m[1]), steps: interpretEffectText(m[2]) });
+    triggers.push({ scope: classifyOwnerScope(m[1]), dyingType: classifyDyingType(m[1]), nontoken: /\bnontoken\b/.test(m[1]), steps: interpretEffectText(m[2]) });
   }
   const allUnsupported = triggers.length === 0 || triggers.every(t => isFullyUnsupported(t.steps));
   if (allUnsupported) {
@@ -4487,7 +4780,7 @@ export function getCyclingAbility(card) {
 export function getAlternativeCosts(card) {
   const text = (card.oracleText || '').replace(/\([^()]*\)/g, '');
   const result = [];
-  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload', 'mutate', 'web-slinging', 'sneak', 'bestow']) {
+  for (const kind of ['dash', 'blitz', 'evoke', 'emerge', 'spectacle', 'prowl', 'surge', 'freerunning', 'warp', 'overload', 'mutate', 'web-slinging', 'sneak', 'bestow', 'cleave']) {
     const m = text.match(new RegExp(`^${kind} ((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[1] });
   }
@@ -4496,6 +4789,9 @@ export function getAlternativeCosts(card) {
     const m = text.match(new RegExp(`^${kind} (\\d+)\\s*[—-]\\s*((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[2], amount: parseInt(m[1], 10) });
   }
+  // "Moonfolk offering": sacrifice a [type] and pay the difference.
+  const offering = text.match(/^([a-z]+) offering\b/im);
+  if (offering) result.push({ kind: 'offering', manaCost: card.manaCost, offeringType: offering[1].toLowerCase() });
   const proto = text.match(/^prototype ((?:\{[^}]+\})+)\s*[—-]\s*(\d+)\/(\d+)/im);
   if (proto) result.push({ kind: 'prototype', manaCost: proto[1], power: proto[2], toughness: proto[3] });
   return result;
@@ -4800,6 +5096,22 @@ export function getRenew(card) {
 }
 // Strive: "This spell costs {N} more to cast for each target beyond the first."
 export function getStriveCost(card) { const m = (card.oracleText || '').match(/this spell costs ((?:\{[^}]+\})+) more to cast for each target beyond the first/i); return m ? m[1] : null; }
+
+// Echo: "Echo {3}{G}{G}" / "Echo—Discard a card" / Volcano Hellion's
+// "echo {X}, where X is your life total" — { mana } | { discard } | { lifeTotal }.
+export function getEcho(card) {
+  const t = plainText(card);
+  let m = t.match(/^echo\s*((?:\{[^}]+\})+)/im);
+  if (m) return { mana: m[1] };
+  if (/^echo\s*—\s*discard a card/im.test(t)) return { discard: true };
+  if (/has echo \{x\}, where x is your life total/i.test(t)) return { lifeTotal: true };
+  return null;
+}
+// Cases: "To solve — COND" and "Solved — ABILITY".
+export function getCaseSolve(card) {
+  const m = (card.oracleText || '').replace(/\([^()]*\)/g, '').match(/^to solve\s*—\s*(.+?)\.?\s*$/im);
+  return m ? m[1].trim() : null;
+}
 
 // Batch 12 readers.
 // "More Than Meets the Eye {2}{R}" — cast it converted (back face) for that.
