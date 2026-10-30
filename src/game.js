@@ -761,12 +761,17 @@ export class Game {
       if (!this.findPermanent(watcher.id)) continue;
       const entries = interpretTribalEtbTriggers(watcher.card);
       for (const entry of entries) {
-        if (!hasTypeWord(enteredPerm.card, entry.typeWord)) continue;
+        const nontoken = /^nontoken /.test(entry.typeWord);
+        if (nontoken && isTokenCard(enteredPerm.card)) continue;
+        if (!hasTypeWord(enteredPerm.card, entry.typeWord.replace(/^nontoken /, ''))) continue;
+        // "with power 2 or less" (Mentor of the Meek) — a stat filter.
+        const pf = entry.keywordFilter && entry.keywordFilter.match(/^power (\d+) or (less|greater)$/);
+        if (pf) { const pw = this.effectivePower(enteredPerm); if (pf[2] === 'less' ? pw > +pf[1] : pw < +pf[1]) continue; }
         // "A creature you control WITH FLYING enters" (Dragon Tempest) — a
         // keyword filter on top of the type-line one above, checked against
         // the entering permanent's REAL effective keywords (anthem-granted
         // included), not just its own printed keyword list.
-        if (entry.keywordFilter && !this.effectiveKeywords(enteredPerm).has(entry.keywordFilter)) continue;
+        if (entry.keywordFilter && !pf && !this.effectiveKeywords(enteredPerm).has(entry.keywordFilter)) continue;
         // "Another [Type] you control enters" (Marwyn, the Nurturer) is
         // exclusive of the watcher's own arrival — she shouldn't trigger off
         // herself entering — unlike every other tribal-ETB wording, which
@@ -3540,6 +3545,7 @@ export class Game {
     // chosen "• A — ..." line.
     this.offerEntryModeChoice(perm);
     this.offerEntryColorChoice(perm);
+    this.offerImprint(perm);
     if (isAura(perm.card) && /enchant creature card in a graveyard/i.test(perm.card.oracleText || '') && !perm.attachedTo) this.enterGraveyardAura(perm);
     if (/^(?:daybound|nightbound)\b/im.test((perm.card.oracleText || '').replace(/\([^()]*\)/g, ''))) {
       if (!this.dayNight) this.setDayNight('day');
@@ -3832,7 +3838,10 @@ export class Game {
     if (sacrificeKind === 'self') return sourcePerm;
     const p = this.getPlayer(playerId);
     const others = p.battlefield.filter(x => isCreature(x.card) && x.id !== sourcePerm.id);
-    if (others.length > 0) return others.sort((a, b) => this.effectivePower(a) - this.effectivePower(b))[0];
+    // An effect that scales with the sacrificed creature's power (Greater
+    // Good, Altar of Dementia) wants the biggest one.
+    const big = /sacrificed creature'?s power/i.test(sourcePerm.card.oracleText || '');
+    if (others.length > 0) return others.sort((a, b) => big ? this.effectivePower(b) - this.effectivePower(a) : this.effectivePower(a) - this.effectivePower(b))[0];
     if (sacrificeKind === 'any' && isCreature(sourcePerm.card)) return sourcePerm;
     return null;
   }
@@ -3879,10 +3888,12 @@ export class Game {
 
     this.markAbilityUsed(perm, ability);
     if (ability.discardNamed) { const p0 = this.getPlayer(playerId); const twin = p0.hand.find(c => c.name === perm.card.name); if (twin) { this.log(`${p0.name} discards another ${twin.name} (grandeur).`); this.discardCard(p0, twin); } }
-    let sacrificedName = null;
+    let sacrificedName = null, sacrificedPower = 0, sacrificedCard = null;
     if (ability.sacrifice) {
       const toSac = this.findSacrificeFodder(playerId, perm, ability.sacrifice);
       sacrificedName = toSac.card.name;
+      sacrificedPower = isCreature(toSac.card) ? this.effectivePower(toSac) : 0;
+      sacrificedCard = toSac.card;
       this.movePermanentToGraveyard(toSac, { sacrifice: true });
     }
 
@@ -3899,7 +3910,7 @@ export class Game {
       this.afterAction(playerId);
       return { ok: true };
     }
-    this.resolveEffectSteps(ability.steps, targets, { controllerId: playerId, card: perm.card, sourcePerm: perm });
+    this.resolveEffectSteps(ability.steps, targets, { controllerId: playerId, card: perm.card, sourcePerm: perm, sacrificedPower, sacrificedCard });
     this.checkStateBasedActions();
     this.afterAction(playerId);
     return { ok: true };
@@ -6174,6 +6185,64 @@ export class Game {
     };
     const ranked = opts.sort((a, b) => (b.c.cmc || 0) - (a.c.cmc || 0));
     this.requestChoice(p.id, `${perm.card.name}: return which creature?`, ranked.slice(0, 10).map(o => ({ label: `${o.c.name}${o.pl.id !== p.id ? ` (${o.pl.name}'s)` : ''}`, resolve: go(o) })), 0);
+  }
+
+
+  // ---------- Long tail, round 3 ----------
+
+  // Chrome Mox / Isochron Scepter imprint: exile a card from hand as it
+  // enters. The AI imprints its least useful matching card; a human picks.
+  offerImprint(perm) {
+    const m = (perm.card.oracleText || '').toLowerCase().match(/imprint — when this artifact enters, you may exile an? (nonartifact, nonland|instant) card(?: with mana value (\d+) or less)? from your hand/);
+    if (!m || perm.imprinted) return;
+    const p = this.getPlayer(perm.controllerId);
+    const fits = (c) => m[1] === 'instant' ? isInstant(c) && (c.cmc || 0) <= (parseInt(m[2], 10) || 99) : !isLand(c) && !isArtifact(c);
+    const pool = p.hand.filter(fits);
+    if (!pool.length) return;
+    const imprint = (c) => () => {
+      const i = p.hand.indexOf(c); if (i === -1) return;
+      p.hand.splice(i, 1); p.exile.push(c); perm.imprinted = c;
+      if (/add one mana of any of the exiled card'?s colors/i.test(perm.card.oracleText || '')) perm.card = { ...perm.card, producedMana: [...(c.colors || [])], _printed: perm.card._printed || perm.card };
+      this.log(`${perm.card.name} imprints ${c.name}.`);
+    };
+    const ranked = pool.slice().sort((a, b) => (b.cmc || 0) - (a.cmc || 0));
+    this.requestChoice(p.id, `${perm.card.name}: imprint which card?`, [...ranked.slice(0, 8).map(c => ({ label: c.name, resolve: imprint(c) })), { label: "Don't imprint", resolve: () => {} }], 0);
+  }
+
+  // Dig Through Time-style: look at the top N, put K into your hand, the
+  // rest on the bottom. AI: lands while short on them, then the priciest.
+  applyDigTake(ctx, n, k) {
+    const p = this.getPlayer(ctx.controllerId);
+    const looked = p.library.splice(0, n);
+    const lands = p.battlefield.filter(x => isLand(x.card)).length;
+    const ranked = looked.slice().sort((a, b) => (isLand(b) && lands < 5 ? 10 : (b.cmc || 0)) - (isLand(a) && lands < 5 ? 10 : (a.cmc || 0)));
+    const take = ranked.slice(0, k);
+    p.hand.push(...take);
+    p.library.push(...looked.filter(c => !take.includes(c)));
+    this.log(`${ctx.card.name}: ${p.name} takes ${take.map(c => c.name).join(' and ')}.`);
+  }
+
+  // Victimize: return two creature cards (tapped) after sacrificing one.
+  applyVictimize(ctx) {
+    const p = this.getPlayer(ctx.controllerId);
+    const picks = p.graveyard.filter(c => isCreature(c)).sort((a, b) => (b.cmc || 0) - (a.cmc || 0)).slice(0, 2);
+    const fodder = p.battlefield.filter(x => isCreature(x.card)).sort((a, b) => this.effectivePower(a) - this.effectivePower(b))[0];
+    if (!fodder) { this.log(`${ctx.card.name}: nothing to sacrifice.`); return; }
+    this.movePermanentToGraveyard(fodder, { sacrifice: true });
+    for (const c of picks) { const i = p.graveyard.indexOf(c); if (i === -1) continue; p.graveyard.splice(i, 1); this.putCardOntoBattlefield(c, p.id, { tapped: true }); }
+    this.log(`${ctx.card.name} returns ${picks.map(c => c.name).join(' and ')}.`);
+  }
+
+  // "You may sacrifice another creature. If you do, you gain X life and draw
+  // X cards, where X is that creature's power." AI: only a creature it
+  // values less than the cards (power >= 2, not its best).
+  applySacForPowerPayoff(ctx, gain, draw) {
+    const p = this.getPlayer(ctx.controllerId);
+    const others = p.battlefield.filter(x => isCreature(x.card) && x.id !== ctx.sourcePerm?.id).sort((a, b) => this.effectivePower(b) - this.effectivePower(a));
+    const best = p.isAI ? others.find((x, i) => this.effectivePower(x) >= 2 && (i > 0 || others.length === 1 || isTokenCard(x.card))) : null;
+    const doIt = (x) => { const pw = this.effectivePower(x); this.movePermanentToGraveyard(x, { sacrifice: true }); if (gain) p.life += pw; if (draw) this.applyDrawEffect({ ...ctx, target: null }, pw); this.log(`${p.name} sacrifices ${x.card.name} for ${pw}.`); };
+    if (p.isAI) { if (best) doIt(best); return; }
+    this.requestChoice(p.id, `${ctx.card.name}: sacrifice another creature?`, [{ label: "Don't sacrifice", resolve: () => {} }, ...others.slice(0, 8).map(x => ({ label: `Sacrifice ${x.card.name} (${this.effectivePower(x)})`, resolve: () => doIt(x) }))], 0);
   }
 
   // ---------- Infinite loops ----------
@@ -9444,9 +9513,11 @@ export class Game {
       this.log(`${p.name} has no creature to sacrifice.`);
       return;
     }
-    const worst = creatures.sort((a, b) => this.effectivePower(a) - this.effectivePower(b))[0];
-    this.movePermanentToGraveyard(worst, { sacrifice: true });
-    this.log(`${p.name} sacrifices ${worst.card.name}.`);
+    const sorted = creatures.sort((a, b) => this.effectivePower(a) - this.effectivePower(b));
+    for (const worst of sorted.slice(0, ctx.edictCount || 1)) {
+      this.movePermanentToGraveyard(worst, { sacrifice: true });
+      this.log(`${p.name} sacrifices ${worst.card.name}.`);
+    }
   }
 
   // "Return a creature you control to its owner's hand" (Whitemane Lion,
@@ -10834,7 +10905,11 @@ export class Game {
     // Infusion (life gained this turn) and Descend (a permanent card put
     // into your graveyard this turn), noticed here as they change.
     // Teferi's Protection: the life total can't change.
-    for (const p of this.players) if (p.lifeLockedAt != null && p.life !== p.lifeLockedAt) p.life = p.lifeLockedAt;
+    for (const p of this.players) {
+      // Flare of Fortitude's lock lasts only until end of turn.
+      if (p.lifeLockTurn != null && p.lifeLockTurn !== this.turnNumber) { p.lifeLockTurn = null; p.lifeLockedAt = null; }
+      if (p.lifeLockedAt != null && p.life !== p.lifeLockedAt) p.life = p.lifeLockedAt;
+    }
     for (const p of this.players) {
       if (p._lastLife != null && p.life > p._lastLife) { const gained = p.life - p._lastLife; p._lastLife = p.life; this.onLifeGained(p, gained); }
       p._lastLife = p.life;
