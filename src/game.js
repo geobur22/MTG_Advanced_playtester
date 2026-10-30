@@ -5753,6 +5753,7 @@ export class Game {
   // Anticipation, Vedalken Orrery) / "creature spells" (Yeva's Forcemage,
   // Alchemist's Refuge-style).
   hasFlashGrant(pl, card) {
+    if (pl.flashTurn === this.turnNumber) return true;
     for (const { line } of this.staticLines(pl)) {
       const m = line.match(/^you may cast ([a-z ]*?)spells(?: and [a-z ]+)? as though they had flash/);
       if (!m) continue;
@@ -5848,6 +5849,155 @@ export class Game {
         this.requestChoice(pl.id, `Begin the game with ${card.name} on the battlefield?`, [{ label: 'Yes', resolve: begin }, { label: 'No', resolve: () => {} }], 0);
       }
     }
+  }
+
+
+  // ---------- Long-tail effect helpers ----------
+
+  // A modal triggered/activated ability on a permanent: choose the mode(s)
+  // on resolution, then their targets. The AI scores modes by what they'd
+  // accomplish; a human picks (then targets, if the mode needs any).
+  resolveModalAbility(ctx, modes, { count = 1, atRandom = false } = {}) {
+    const p = this.getPlayer(ctx.controllerId);
+    const opp = this.opponentOf(p.id);
+    const usable = modes.map((md, i) => ({ ...md, i })).filter(md => !isFullyUnsupportedSteps(md.steps));
+    const feasible = usable.filter(md => this.minRequiredTargetCount(md.steps) <= pickTargetsForKinds(this, ctx.card, p.id, expandTargetKinds(md.steps)).filter(Boolean).length);
+    if (!feasible.length) { this.log(`${ctx.card.name}: no mode can be chosen.`); return; }
+    const score = (md) => md.steps.reduce((sc, st) => sc + ({ destroy: 5, exile: 5, damage: 4, bounce: 3, counter: 4, draw: 3, token: 3, tutor: 3, reanimate: 4, regrowth: 3, counters: 2, pump: 2, discard: opp.hand.length ? 2 : 0, edict: 3, mana: 1, gainLife: 1, mill: 1 }[st.kind] ?? 1), 0) - (/you lose|sacrifice a|discard a card/.test(md.label) ? 2 : 0);
+    const run = (md) => {
+      const kinds = expandTargetKinds(md.steps);
+      const go = (targets) => this.resolveEffectSteps(md.steps, targets, ctx);
+      if (!kinds.length) { go([]); return; }
+      if (!p.isAI && !this.pendingRequest && this.promptHumanTargets(p.id, ctx.card, kinds, go)) return;
+      go(pickTargetsForKinds(this, ctx.card, p.id, kinds).filter(Boolean));
+    };
+    if (atRandom) { const md = feasible[Math.floor(Math.random() * feasible.length)]; this.log(`${ctx.card.name}: "${md.label}" (at random).`); run(md); return; }
+    if (p.isAI) {
+      const picks = feasible.slice().sort((a, b) => score(b) - score(a)).slice(0, count);
+      for (const md of picks) { this.log(`${ctx.card.name}: ${p.name} chooses "${md.label}".`); run(md); }
+      return;
+    }
+    const chosen = [];
+    const ask = () => {
+      const left = feasible.filter(md => !chosen.includes(md));
+      if (chosen.length >= count || !left.length) { for (const md of chosen) run(md); return; }
+      const opts = left.map(md => ({ label: md.label.replace(/\.$/, ''), resolve: () => { chosen.push(md); ask(); } }));
+      if (chosen.length) opts.push({ label: `Done (${chosen.length} chosen)`, resolve: () => { for (const md of chosen) run(md); } });
+      this.requestChoice(p.id, `${ctx.card.name}: choose ${count > 1 ? `up to ${count - chosen.length} more` : 'one'}`, opts, 0);
+    };
+    ask();
+  }
+
+  // The human picks targets through the same prompt an enters trigger
+  // uses; onComplete receives them. Returns false if a prompt can't start.
+  promptHumanTargets(playerId, card, kinds, onComplete) {
+    if (this.pendingRequest) return false;
+    this._pendingETB = { onComplete };
+    this.pendingRequest = { type: 'etbTarget', playerId, cardName: card.name, kinds, collected: [], sourcePermId: null };
+    this.emit();
+    return true;
+  }
+
+  // Impulse draw: the top N cards are exiled; playable this turn (or until
+  // the end of your next turn).
+  applyImpulseDraw(ctx, n, nextTurn) {
+    const p = this.getPlayer(ctx.controllerId);
+    for (let i = 0; i < n && p.library.length; i++) {
+      const card = p.library.shift();
+      p.exiledPlayable.push({ id: uid('exile'), card, remainingOwnTurns: nextTurn ? 2 : 1, kind: 'impulse', expiresTurn: nextTurn ? null : this.turnNumber });
+      this.log(`${ctx.card.name} exiles ${card.name} — ${p.name} may play it ${nextTurn ? 'until the end of their next turn' : 'this turn'}.`);
+    }
+  }
+
+  // "You may discard a card. If you do, draw a card." AI: only when it has
+  // a dead card (excess land or something it can't cast soon).
+  applyOptionalRummage(ctx, draw) {
+    const p = this.getPlayer(ctx.controllerId);
+    if (!p.hand.length) return;
+    const lands = p.battlefield.filter(x => isLand(x.card)).length;
+    const fodder = p.hand.filter(c => isLand(c) ? lands >= 5 : (c.cmc || 0) > lands + 2);
+    const doIt = (c) => { this.log(`${p.name} discards ${c.name}.`); this.discardCard(p, c); this.applyDrawEffect({ ...ctx, target: null }, draw); };
+    if (p.isAI) { if (fodder[0]) doIt(fodder[0]); return; }
+    const seen = new Set();
+    const opts = [{ label: "Don't discard", resolve: () => {} }];
+    for (const c of p.hand) { if (seen.has(c.name)) continue; seen.add(c.name); opts.push({ label: `Discard ${c.name}`, resolve: () => doIt(c) }); }
+    this.requestChoice(p.id, `${ctx.card.name}: discard a card to draw ${draw}?`, opts, 0);
+  }
+
+  // A died card returns to the battlefield (Enduring cycle: as a
+  // non-creature enchantment; Aclazotz: transformed).
+  returnDiedCard(ctx, { tapped = false, transformed = false, notCreature = false } = {}) {
+    const card = ctx.diedCard || ctx.card;
+    const owner = this.players.find(pl => pl.graveyard.includes(card));
+    if (!owner) return;
+    owner.graveyard.splice(owner.graveyard.indexOf(card), 1);
+    const perm = makePermanent(card, owner.id);
+    perm.tapped = tapped;
+    owner.battlefield.push(perm);
+    if (transformed && card.faces?.[1]) { perm._dfcCard = card; perm.card = faceCard(card, 1); }
+    if (notCreature) perm.card = { ...perm.card, typeLine: perm.card.typeLine.replace(/\bCreature\s*/, '').replace(/\s+—/, ' —'), _printed: card };
+    this.log(`${card.name} returns to the battlefield${transformed ? ' transformed' : ''}${notCreature ? " (it's an enchantment, not a creature)" : ''}.`);
+    this.checkStateBasedActions();
+    this.triggerETB(perm);
+  }
+
+  returnSourceToHand(ctx) {
+    const self = ctx.sourcePerm && this.findPermanent(ctx.sourcePerm.id);
+    if (self) { this.applyBounceEffect({ ...ctx, target: { type: 'permanent', id: self.id } }); return; }
+    const owner = this.players.find(pl => pl.graveyard.includes(ctx.card));
+    if (owner) { owner.graveyard.splice(owner.graveyard.indexOf(ctx.card), 1); owner.hand.push(ctx.card); this.log(`${ctx.card.name} returns to ${owner.name}'s hand.`); }
+  }
+
+  // "Look at the top N; you may reveal a TYPE card and put it into your
+  // hand; the rest on the bottom." AI: the best match.
+  applyDig(ctx, n, types) {
+    const p = this.getPlayer(ctx.controllerId);
+    const looked = p.library.splice(0, n);
+    const matches = looked.filter(c => types.some(t => t === 'card' || hasTypeWord(c, t.replace(/s$/, ''))));
+    const pick = matches.sort((a, b) => (b.cmc || 0) - (a.cmc || 0))[0];
+    if (pick) { p.hand.push(pick); this.log(`${ctx.card.name}: ${p.name} reveals ${pick.name} and puts it into their hand.`); }
+    p.library.push(...shuffle(looked.filter(c => c !== pick)));
+  }
+
+  // Discover N: exile from the top until a nonland card with mana value N
+  // or less; cast it free or put it into your hand (the AI casts it when it
+  // can), the rest on the bottom.
+  applyDiscover(ctx, n) {
+    const p = this.getPlayer(ctx.controllerId);
+    const exiled = [];
+    let hit = null;
+    while (p.library.length) { const c = p.library.shift(); if (!isLand(c) && (c.cmc || 0) <= n) { hit = c; break; } exiled.push(c); }
+    p.library.push(...shuffle(exiled));
+    if (!hit) { this.log(`${ctx.card.name}: discover ${n} finds nothing.`); return; }
+    this.log(`${ctx.card.name}: discover ${n} hits ${hit.name}.`);
+    const toHand = () => { p.hand.push(hit); this.log(`${p.name} puts ${hit.name} into their hand.`); };
+    const cast = () => this.castFromOutsideHand(p.id, hit, { free: true, onFail: toHand });
+    this.requestChoice(p.id, `Discover: cast ${hit.name} free, or put it into your hand?`, [{ label: `Cast ${hit.name} free`, resolve: cast }, { label: 'Put it into hand', resolve: toHand }], 0);
+  }
+
+  // Earthbend N: a land you control becomes a 0/0 haste creature (still a
+  // land) with N +1/+1 counters; it returns tapped when it dies.
+  applyEarthbend(ctx, n) {
+    const p = this.getPlayer(ctx.controllerId);
+    const lands = p.battlefield.filter(x => isLand(x.card) && !isCreature(x.card));
+    if (!lands.length) return;
+    const bend = (land) => {
+      land.awakened = true; land.earthbent = true;
+      this.refreshCardState(land);
+      this.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: land.id } }, n, '+1/+1');
+      this.log(`${ctx.card.name}: ${land.card.name} earthbends into a ${n}/${n} creature.`);
+    };
+    if (p.isAI || lands.length === 1) { bend(lands.slice().sort((a, b) => (b.tapped - a.tapped) || (/\bbasic\b/i.test(b.card.typeLine) - /\bbasic\b/i.test(a.card.typeLine)))[0]); return; }
+    this.requestChoice(p.id, `${ctx.card.name}: earthbend which land?`, lands.slice(0, 10).map(l => ({ label: l.card.name + (l.tapped ? ' (tapped)' : ''), resolve: () => bend(l) })), 0);
+  }
+
+  applyEntomb(ctx, clause) {
+    const p = this.getPlayer(ctx.controllerId);
+    const type = (clause.match(/for an? ([a-z]+) card/) || [])[1];
+    const pool = p.library.filter(c => !type || hasTypeWord(c, type));
+    const pick = pool.slice().sort((a, b) => (b.cmc || 0) - (a.cmc || 0))[0];
+    if (pick) { p.library.splice(p.library.indexOf(pick), 1); p.graveyard.push(pick); this.log(`${ctx.card.name} puts ${pick.name} into ${p.name}'s graveyard.`); }
+    p.library = shuffle(p.library);
   }
 
   // ---------- Infinite loops ----------
@@ -7194,8 +7344,22 @@ export class Game {
       target.damage += amount;
     }
     // Enrage: "whenever this creature is dealt damage".
+    // Enrage waits until the current effect is done and state-based actions
+    // are checked (it would go on the stack), so a fight finishes and the
+    // loser dies before "it fights up to one target creature" picks again.
     const enrage = memoSteps(interpretDealtDamageTriggers, target.card);
-    if (enrage.length && this.findPermanent(target.id)) this.runPermanentTrigger(target, enrage, { damageAmount: amount });
+    if (enrage.length) (this._enrageQueue ||= []).push({ target, enrage, amount });
+  }
+
+  flushEnrageQueue() {
+    if (this._flushingEnrage || !this._enrageQueue?.length) return;
+    this._flushingEnrage = true;
+    try {
+      while (this._enrageQueue.length && !this.gameOver) {
+        const { target, enrage, amount } = this._enrageQueue.shift();
+        if (this.findPermanent(target.id)) this.runPermanentTrigger(target, enrage, { damageAmount: amount });
+      }
+    } finally { this._flushingEnrage = false; }
   }
 
   // Damage to a player: Infect gives poison counters instead of life loss.
@@ -8533,6 +8697,7 @@ export class Game {
     // Foretold/plotted/warped cards: only on a later turn; plotted ones
     // only at sorcery speed.
     if (entry.notOnTurn === this.turnNumber) return false;
+    if (entry.expiresTurn != null && entry.expiresTurn !== this.turnNumber) return false;
     if (!isLand(card) && (this.splitSecondActive() || p.cantCastSpells)) return false;
     if (entry.sorceryOnly && !(p.id === this.active.id && (this.step === 'main1' || this.step === 'main2') && this.stack.length === 0)) return false;
     if (isLand(card)) return this.canPlayLand(playerId);
@@ -9460,6 +9625,19 @@ export class Game {
     this.getPlayer(perm.ownerId).graveyard.push(...this.cardsOf(perm));
     this.leftBattlefieldThisTurn.push({ card: perm.card, ownerId: perm.ownerId });
     this.triggerDies(perm, previouslyAttachedIds);
+    // Earthbend: the land returns to the battlefield tapped.
+    if (perm.earthbent) {
+      const owner = this.getPlayer(perm.ownerId);
+      const i = owner.graveyard.indexOf(perm.card);
+      if (i !== -1) {
+        owner.graveyard.splice(i, 1);
+        const land = makePermanent(perm.card, owner.id);
+        land.tapped = true; land.summoningSick = false;
+        owner.battlefield.push(land);
+        this.log(`${perm.card.name} returns to the battlefield tapped (earthbend).`);
+        this.triggerETB(land);
+      }
+    }
     if (wasCreature) this.triggerRecover(this.getPlayer(perm.ownerId), perm.card);
   }
 
@@ -10297,6 +10475,8 @@ export class Game {
   resolveCombatDamage() {
     const attackers = this.allCreatures().filter(x => x.attacking);
     if (attackers.length === 0) return;
+    // Fog: all combat damage this turn is prevented.
+    if (this.fogTurn === this.turnNumber) { this.log('Combat damage is prevented.'); return; }
 
     const hasFirstStrikers = attackers.some(a => this.effectiveKeywords(a).has('first strike') || this.effectiveKeywords(a).has('double strike')) ||
       attackers.some(a => a.blockedBy.some(id => {
@@ -10453,6 +10633,12 @@ export class Game {
   }
 
   checkStateBasedActions() {
+    this.stateBasedActionsOnce();
+    // Then triggers that were waiting on them (Enrage).
+    if (this._enrageQueue?.length) this.flushEnrageQueue();
+  }
+
+  stateBasedActionsOnce() {
     this.checkLinkedControl();
     if (this.gameOver) return;
     this.refreshAllCardStates();

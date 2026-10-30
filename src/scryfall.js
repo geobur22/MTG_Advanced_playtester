@@ -6,6 +6,21 @@ const CACHE = new Map(); // name (lowercased) -> normalized card
 // Exported so other Scryfall-querying scripts (e.g. seed-staples.mjs, which
 // hits /cards/search rather than /cards/collection) can reuse the exact same
 // normalization instead of re-implementing double-faced-card handling.
+// On permanents, a modal triggered/activated ability's "• mode" lines are
+// joined onto the ability's own line ("..., choose one — • A. • B.") so each
+// ability stays one line for the line-based interpreters. Spells keep
+// their bullets (getSpellModes reads them).
+export function joinPermanentModes(text, typeLine) {
+  if (!text || /\b(?:Instant|Sorcery)\b/.test(typeLine || '') || !text.includes('•')) return text;
+  const out = [];
+  for (const line of text.split('\n')) {
+    const prev = out[out.length - 1];
+    if (line.trim().startsWith('•') && prev && (/choose (?:one|two|three|one or both|one or more|up to one|up to two|any number)(?: that hasn'?t been chosen(?: this turn)?)?(?: at random)?\s*—/i.test(prev))) out[out.length - 1] = `${prev} ${line.trim()}`;
+    else out.push(line);
+  }
+  return out.join('\n');
+}
+
 export function normalize(raw) {
   // Multi-face cards (transforming and modal double-faced cards, split,
   // adventure, and flip cards) store each face's cost, types, text, and
@@ -19,7 +34,7 @@ export function normalize(raw) {
     name: f.name,
     manaCost: f.mana_cost || '',
     typeLine: f.type_line || '',
-    oracleText: f.oracle_text || '',
+    oracleText: joinPermanentModes(f.oracle_text || '', f.type_line),
     power: f.power ?? null,
     toughness: f.toughness ?? null,
     loyalty: f.loyalty ?? null,
@@ -34,7 +49,7 @@ export function normalize(raw) {
     manaCost: face.mana_cost || raw.mana_cost || '',
     cmc: raw.cmc || 0,
     typeLine: rawFaces ? (face.type_line || raw.type_line || '') : (raw.type_line || ''),
-    oracleText: face.oracle_text || raw.oracle_text || '',
+    oracleText: joinPermanentModes(face.oracle_text || raw.oracle_text || '', rawFaces ? face.type_line : raw.type_line),
     power: face.power ?? raw.power ?? null,
     toughness: face.toughness ?? raw.toughness ?? null,
     colors: rawFaces ? (face.colors || raw.colors || []) : (raw.colors || []),

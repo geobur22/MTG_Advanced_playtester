@@ -767,6 +767,63 @@ function interpretEffectText(text) {
   // handled by game.js once a mode is chosen; drop them here.
   text = text.replace(/^•\s*[a-z]+\s*—[^\n]*$/gm, '');
 
+  // A permanent's modal ability: "choose one — • A. • B." (bullets joined
+  // onto the ability's line by normalize). Each mode is its own effect; the
+  // choice is made on resolution (game.resolveModalAbility).
+  const modalAb = text.match(/choose (one|two|three|one or both|one or more|up to one|up to two|any number)(?: that hasn'?t been chosen(?: this turn)?)?(?: at random)?\s*—\s*(•[\s\S]+)$/);
+  if (modalAb) {
+    const countWord = modalAb[1];
+    const modes = modalAb[2].split('•').map(x => x.trim()).filter(Boolean).map(label => ({ label, steps: interpretEffectText(label) }));
+    if (modes.some(md => !isFullyUnsupported(md.steps))) {
+      const count = { one: 1, two: 2, three: 3, 'one or both': 2, 'one or more': modes.length, 'up to one': 1, 'up to two': 2, 'any number': modes.length }[countWord];
+      const atRandom = /at random/.test(modalAb[0]);
+      steps.push({ kind: 'modal', targeting: 'none', resolve: (game, ctx) => game.resolveModalAbility(ctx, modes, { count, atRandom }) });
+      text = text.slice(0, text.length - modalAb[0].length);
+    }
+  }
+  // Dark Confidant: "reveal the top card of your library and put that card
+  // into your hand. You lose life equal to its mana value."
+  const bob = text.match(/reveal the top card of your library and put that card into your hand\. you lose life equal to its mana value\.?/);
+  if (bob) {
+    steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => {
+      const p = game.getPlayer(ctx.controllerId); const c = p.library.shift(); if (!c) return;
+      p.hand.push(c); game.log(`${ctx.card.name} reveals ${c.name}; ${p.name} loses ${c.cmc || 0} life.`); p.life -= c.cmc || 0; game.checkStateBasedActions();
+    } });
+    text = text.replace(bob[0], '');
+  }
+  // Impulse draw: "exile the top card of your library. You may play it /
+  // that card this turn" (and "until the end of your next turn").
+  const impulse = text.match(/exile the top (card|two cards|three cards) of your library\. (?:until (?:the )?end of (?:your next )?turn, you may play (?:it|that card|them|those cards)|you may play (?:it|that card|them|those cards) (this turn|until (?:the )?end of your next turn))\.?/);
+  if (impulse) {
+    const n = impulse[1] === 'card' ? 1 : impulse[1].startsWith('two') ? 2 : 3;
+    const nextTurn = /next turn/.test(impulse[0]);
+    steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => game.applyImpulseDraw(ctx, n, nextTurn) });
+    text = text.replace(impulse[0], '');
+  }
+  // "You may discard a card. If you do, draw a card." (optional rummage)
+  const rummage1 = text.match(/(?:you may )?discard a card\. if you do, draw (a|two) cards?\.?/);
+  if (rummage1) {
+    const draw = rummage1[1] === 'two' ? 2 : 1;
+    steps.push({ kind: 'discard', targeting: 'none', resolve: (game, ctx) => game.applyOptionalRummage(ctx, draw) });
+    text = text.replace(rummage1[0], '');
+  }
+  // Enduring cycle: "if it was a creature, return it to the battlefield
+  // under its owner's control. It's an enchantment."
+  const enduring = text.match(/if it was a creature, return it to the battlefield under its owner'?s control\. it'?s an enchantment\.?/);
+  if (enduring) {
+    steps.push({ kind: 'reanimate', targeting: 'none', resolve: (game, ctx) => game.returnDiedCard(ctx, { notCreature: true }) });
+    text = text.replace(enduring[0], '');
+  }
+  // Generic "look at the top N cards. You may reveal a TYPE card from among
+  // them and put it into your hand. Put the rest on the bottom in a random
+  // order." (Adaptive Omnitool, Impulse, Commune with the Gods-style).
+  const dig = text.match(/look at the top (\w+) cards of your library\. you may reveal an? ([a-z ,/-]+?) card from among them and put it into your hand\. put the rest on the bottom of your library in (?:a random|any) order\.?/);
+  if (dig) {
+    const n = parseAmount(dig[1]); const types = dig[2].split(/,?\s+or\s+|,\s*|\s+and\/or\s+/).map(w => w.trim()).filter(Boolean);
+    steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => game.applyDig(ctx, n, types) });
+    text = text.replace(dig[0], '');
+  }
+
   // Kinship: "You may look at the top card of your library. If it shares a
   // creature type with this creature, you may reveal it. If you do, EFFECT."
   const kinship = text.match(/(?:you may )?look at the top card of your library\. if it shares a creature type with this creature, you may reveal it\. if you do, ([^.]+)\.?/);
@@ -1604,6 +1661,128 @@ function interpretEffectText(text) {
     // Clone entry text is handled by game.js when the permanent enters.
     if (/^you may have this (?:creature|artifact|enchantment|permanent|land) enter(?: the battlefield)?(?: tapped)? as a copy of /.test(clause)) {
       steps.push({ kind: 'static', targeting: 'none', resolve: () => {} });
+      continue;
+    }
+    // Well of Lost Dreams: "you may pay {X}, where X is less than or equal to
+    // the amount of life you gained. If you do, draw X cards." (X arrives as
+    // ctx.xValue from the life-gain trigger.)
+    if (/^(?:you may )?pay \{x\}, where x is less than or equal to the amount of life you gained$/.test(clause)) {
+      steps.push({ kind: 'payX', targeting: 'none', resolve: (game, ctx) => {
+        const p = game.getPlayer(ctx.controllerId);
+        let x = Math.min(ctx.xValue || 0, 20);
+        while (x > 0 && !game.payableNow(p.id, `{${x}}`)) x--;
+        game._paidX = 0;
+        if (x > 0 && game.payNow(p.id, `{${x}}`)) { game._paidX = x; game.log(`${p.name} pays {${x}}.`); }
+      } });
+      continue;
+    }
+    if (/^if you do, draw x cards$/.test(clause)) {
+      steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => { if (game._paidX) game.applyDrawEffect({ ...ctx, target: null }, game._paidX); game._paidX = 0; } });
+      continue;
+    }
+    // Class level lines ("{2}{U}: Level 2") are handled by the Class code.
+    if (/^level \d+$/.test(clause)) { steps.push({ kind: 'static', targeting: 'none', resolve: () => {} }); continue; }
+    // Earthbend N: target land you control becomes a 0/0 creature with haste
+    // (still a land) with N +1/+1 counters; when it dies, it returns tapped.
+    if ((m = clause.match(/^earthbend (\d+|x)$/))) {
+      const amt = m[1];
+      steps.push({ kind: 'earthbend', targeting: 'none', resolve: (game, ctx) => game.applyEarthbend(ctx, amt === 'x' ? (ctx.xValue || 0) : parseInt(amt, 10)) });
+      continue;
+    }
+    // Adapt N: N +1/+1 counters if it has none.
+    if ((m = clause.match(/^adapt (\d+)$/))) {
+      const amt = parseInt(m[1], 10);
+      steps.push({ kind: 'counters', targeting: 'none', resolve: (game, ctx) => { const self = ctx.sourcePerm && game.findPermanent(ctx.sourcePerm.id); if (self && !(self.counters['+1/+1'] > 0)) game.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: self.id } }, amt, '+1/+1'); } });
+      continue;
+    }
+    // Discover N.
+    if ((m = clause.match(/^discover (\d+|x)$/))) {
+      const amt = m[1];
+      steps.push({ kind: 'cascade', targeting: 'none', resolve: (game, ctx) => game.applyDiscover(ctx, amt === 'x' ? (ctx.xValue || 0) : parseInt(amt, 10)) });
+      continue;
+    }
+    // Fog: "prevent all combat damage that would be dealt this turn".
+    if (/^prevent all combat damage that would be dealt this turn$/.test(clause)) {
+      steps.push({ kind: 'fog', targeting: 'none', resolve: (game) => { game.fogTurn = game.turnNumber; game.log('All combat damage this turn will be prevented.'); } });
+      continue;
+    }
+    // Untaps.
+    if (/^untap all nonland permanents you control$/.test(clause)) {
+      steps.push({ kind: 'untap', targeting: 'none', resolve: (game, ctx) => { for (const x of game.getPlayer(ctx.controllerId).battlefield) if (!game.isLand(x.card)) x.tapped = false; game.log(`${ctx.card.name} untaps every nonland permanent.`); } });
+      continue;
+    }
+    if ((m = clause.match(/^untap (?:another )?target (permanent|artifact|creature|land|nonland permanent)(?: you control)?$/))) {
+      steps.push({ kind: 'untap', targeting: describeTargetKind(m[1] === 'creature' ? 'creature you control' : m[1]), resolve: (game, ctx) => { const x = game.findPermanent(ctx.target?.id); if (x) { x.tapped = false; game.log(`${x.card.name} untaps.`); } } });
+      continue;
+    }
+    if ((m = clause.match(/^(tap|untap) enchanted (?:creature|permanent|artifact|land)$/))) {
+      const tap = m[1] === 'tap';
+      steps.push({ kind: 'tap', targeting: 'none', resolve: (game, ctx) => { const x = ctx.sourcePerm && game.findPermanent(ctx.sourcePerm.attachedTo); if (x) x.tapped = tap; } });
+      continue;
+    }
+    // "You may cast spells this turn as though they had flash."
+    if (/^(?:you may )?cast spells this turn as though they had flash$/.test(clause)) {
+      steps.push({ kind: 'static', targeting: 'none', resolve: (game, ctx) => { game.getPlayer(ctx.controllerId).flashTurn = game.turnNumber; } });
+      continue;
+    }
+    // "Target creature with power N or less can't be blocked this turn."
+    if (/^target (?:attacking )?creature with power \d+ or less can'?t be blocked this turn$/.test(clause)) {
+      steps.push({ kind: 'evasion', targeting: 'creature', resolve: (game, ctx) => game.applyTempKeyword(ctx, 'unblockable') });
+      continue;
+    }
+    // "Put a +1/+1 counter on that creature" — the creature that just
+    // entered/attacked (Good-Fortune Unicorn).
+    if ((m = clause.match(/^put (a|an|one|two|three|\d+) \+1\/\+1 counters? on (?:that creature|it)$/))) {
+      const amt = parseAmount(m[1]);
+      steps.push({ kind: 'counters', targeting: 'none', resolve: (game, ctx) => { const x = ctx.enteredPerm || ctx.attackerPerm || null; if (x && game.findPermanent(x.id)) game.applyCounterAdditionEffect({ ...ctx, target: { type: 'permanent', id: x.id } }, amt, '+1/+1'); } });
+      continue;
+    }
+    // "It fights up to one target creature you don't control" (Apex
+    // Altisaur) / "it deals N damage to up to one target creature".
+    if (/^(?:it|this creature) fights up to one target creature(?: you don'?t control| an opponent controls)?$/.test(clause)) {
+      steps.push({ kind: 'fight', targeting: 'creature', minTargets: 0, resolve: (game, ctx) => game.applyFightEffect(ctx) });
+      continue;
+    }
+    if ((m = clause.match(/^(?:it|this (?:creature|equipment|artifact|enchantment)) deals (\d+) damage to up to one target (creature|creature or planeswalker|planeswalker)(?: an opponent controls| you don'?t control)?$/))) {
+      const amt = parseInt(m[1], 10);
+      steps.push({ kind: 'damage', targeting: 'creature', minTargets: 0, resolve: (game, ctx) => game.applyDamageEffect(ctx, amt) });
+      continue;
+    }
+    // "For each color among permanents you control, add one mana of that color."
+    if (/^for each colou?r among permanents you control, add one mana of that colou?r$/.test(clause)) {
+      steps.push({ kind: 'mana', targeting: 'none', resolve: (game, ctx) => { const cols = new Set(game.getPlayer(ctx.controllerId).battlefield.flatMap(x => x.card.colors || [])); for (const c of cols) game.applyManaEffect(ctx, c); } });
+      continue;
+    }
+    // "Each player sacrifices a creature or planeswalker of their choice."
+    if (/^each player sacrifices a creature or planeswalker(?: of their choice)?$/.test(clause)) {
+      steps.push({ kind: 'edict', targeting: 'none', resolve: (game, ctx) => { for (const pl of game.players) game.applyEdictEffect({ ...ctx, target: { type: 'player', id: pl.id } }); } });
+      continue;
+    }
+    if (/^exile all graveyards$/.test(clause)) {
+      steps.push({ kind: 'exile', targeting: 'none', resolve: (game) => { for (const pl of game.players) { pl.exile.push(...pl.graveyard); pl.graveyard = []; } game.log('All graveyards are exiled.'); } });
+      continue;
+    }
+    // Entomb: "search your library for a card, put that card into your graveyard".
+    if (/^search your library for an? (?:[a-z]+ )?card,? put (?:that card|it) into your graveyard,? then shuffle$/.test(clause)) {
+      steps.push({ kind: 'tutor', targeting: 'none', resolve: (game, ctx) => game.applyEntomb(ctx, clause) });
+      continue;
+    }
+    // "Look at the top three cards of your library, then put them back in
+    // any order." — kept in the same order (a legal choice).
+    if (/^look at the top (?:two|three|four|five) cards of your library,? then put them back in any order$/.test(clause)) {
+      steps.push({ kind: 'scry', targeting: 'none', resolve: (game, ctx) => game.log(`${ctx.card.name}: looks at the top of the library.`) });
+      continue;
+    }
+    // Self-bounce: "return this creature / this card to its owner's hand".
+    if (/^return (?:this (?:creature|card|enchantment|artifact|permanent|aura|equipment)|it|(?!target|each|all|up to|another|that|those|enchanted|equipped)[a-z',-]+(?: [a-z',-]+){0,3}) to its owner'?s hand$/.test(clause)) {
+      steps.push({ kind: 'bounce', targeting: 'none', resolve: (game, ctx) => game.returnSourceToHand(ctx) });
+      continue;
+    }
+    // "Return it to the battlefield [tapped] [and] transformed under its
+    // owner's control" — a dying double-faced creature (Aclazotz).
+    if ((m = clause.match(/^return it to the battlefield( tapped)?(?: and)? transformed under (?:its owner'?s|your) control$/))) {
+      const tapped = !!m[1];
+      steps.push({ kind: 'reanimate', targeting: 'none', resolve: (game, ctx) => game.returnDiedCard(ctx, { tapped, transformed: true }) });
       continue;
     }
     // "You win the game" (Revel in Riches, after its condition).
