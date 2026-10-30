@@ -824,6 +824,47 @@ function interpretEffectText(text) {
     text = text.replace(dig[0], '');
   }
 
+  // Graveyard Auras (Animate Dead, Necromancy, Dance of the Dead): the
+  // reanimation is done by game.js as the Aura enters.
+  if (/it loses "enchant creature card in a graveyard"|return enchanted creature card to the battlefield under your control and attach this aura to it/.test(text)) {
+    steps.push({ kind: 'static', targeting: 'none', resolve: () => {} });
+    text = '';
+  }
+  // Thassa's Oracle: "look at the top X cards of your library, where X is
+  // your devotion to blue. Put up to one of them on top of your library and
+  // the rest on the bottom ... If X is greater than or equal to the number
+  // of cards in your library, you win the game."
+  const oracle = text.match(/look at the top x cards of your library, where x is your devotion to (white|blue|black|red|green)\. put up to one of them on top of your library and the rest on the bottom of your library in a random order\. if x is greater than or equal to the number of cards in your library, you win the game\.?/);
+  if (oracle) {
+    const L = { white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G' }[oracle[1]];
+    steps.push({ kind: 'win', targeting: 'none', resolve: (game, ctx) => {
+      const p = game.getPlayer(ctx.controllerId); const x = game.devotion(p.id, [L]);
+      game.log(`${ctx.card.name}: devotion ${x}, library ${p.library.length}.`);
+      if (x >= p.library.length) game.loseGame(game.opponentOf(p.id).id, ctx.card.name);
+    } });
+    text = text.replace(oracle[0], '');
+  }
+  // Sylvan Library: draw two extra; for each of two cards drawn this turn,
+  // pay 4 life or put it back.
+  const sylvan = text.match(/you may draw two additional cards\. if you do, choose two cards in your hand drawn this turn\. for each of those cards, pay 4 life or put the card on top of your library\.?/);
+  if (sylvan) {
+    steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => game.applySylvanLibrary(ctx) });
+    text = text.replace(sylvan[0], '');
+  }
+  // Teferi's Protection.
+  const tefprot = text.match(/until your next turn, your life total can'?t change and you gain protection from everything\. all permanents you control phase out\.?/);
+  if (tefprot) {
+    steps.push({ kind: 'protect', targeting: 'none', resolve: (game, ctx) => game.applyTeferisProtection(ctx) });
+    text = text.replace(tefprot[0], '');
+  }
+  // Valakut Awakening: "put any number of cards from your hand on the bottom
+  // of your library, then draw that many cards plus one".
+  const valakut = text.match(/put any number of cards from your hand on the bottom of your library, then draw that many cards plus one\.?/);
+  if (valakut) {
+    steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => game.applyBottomAndDraw(ctx) });
+    text = text.replace(valakut[0], '');
+  }
+
   // Kinship: "You may look at the top card of your library. If it shares a
   // creature type with this creature, you may reveal it. If you do, EFFECT."
   const kinship = text.match(/(?:you may )?look at the top card of your library\. if it shares a creature type with this creature, you may reveal it\. if you do, ([^.]+)\.?/);
@@ -1680,6 +1721,205 @@ function interpretEffectText(text) {
       steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => { if (game._paidX) game.applyDrawEffect({ ...ctx, target: null }, game._paidX); game._paidX = 0; } });
       continue;
     }
+    // Mass hexproof/indestructible: "permanents you control gain hexproof
+    // and indestructible until end of turn" (Heroic Intervention), "you and
+    // permanents you control gain hexproof" (Dawn's Truce).
+    if ((m = clause.match(/^(?:you and )?(permanents|creatures|nonland permanents) you control gain ([a-z ,]+?) until end of turn$/))) {
+      const what = m[1]; const kws = m[2].split(/,\s*(?:and\s+)?|\s+and\s+/).map(x => x.trim()).filter(Boolean);
+      steps.push({ kind: 'pump', targeting: 'none', resolve: (game, ctx) => {
+        for (const x of game.getPlayer(ctx.controllerId).battlefield) {
+          if (what === 'creatures' && !game.isCreature(x.card)) continue;
+          if (what === 'nonland permanents' && game.isLand(x.card)) continue;
+          x.tempKeywords.push(...kws);
+        }
+        game.log(`${ctx.card.name}: ${what} gain ${kws.join(' and ')} until end of turn.`);
+      } });
+      continue;
+    }
+    // "Target [legendary] creature [you control] gains hexproof and
+    // indestructible until end of turn" (Plaza of Heroes).
+    if ((m = clause.match(/^target (?:legendary |attacking |nonland )?(?:creature|permanent)(?: you control)? gains ((?:hexproof|indestructible|flying|trample|haste|vigilance|lifelink|deathtouch|first strike|double strike|menace|reach|shroud)(?:,? (?:and )?(?:hexproof|indestructible|flying|trample|haste|vigilance|lifelink|deathtouch|first strike|double strike|menace|reach|shroud))*) until end of turn$/))) {
+      const kws = m[1].split(/,\s*(?:and\s+)?|\s+and\s+/).map(x => x.trim()).filter(Boolean);
+      steps.push({ kind: 'pump', targeting: 'yourCreature', resolve: (game, ctx) => { for (const k of kws) game.applyTempKeyword(ctx, k); } });
+      continue;
+    }
+    // Mother of Runes: "target creature you control gains protection from the
+    // color of your choice until end of turn".
+    if (/^target creature you control gains protection from the colou?r of your choice until end of turn$/.test(clause)) {
+      steps.push({ kind: 'protect', targeting: 'yourCreature', resolve: (game, ctx) => game.applyChosenColorProtection(ctx) });
+      continue;
+    }
+    // Shadowspear: "permanents your opponents control lose hexproof and
+    // indestructible until end of turn".
+    if (/^permanents your opponents control lose hexproof and indestructible until end of turn$/.test(clause)) {
+      steps.push({ kind: 'debuff', targeting: 'none', resolve: (game, ctx) => { for (const x of game.opponentOf(ctx.controllerId).battlefield) x.suppressedKeywords = { turn: game.turnNumber, list: ['hexproof', 'indestructible'] }; } });
+      continue;
+    }
+    // Mass removal by type: "destroy/exile all artifacts / enchantments /
+    // planeswalkers / nonland permanents" (Austere Command, Farewell).
+    if ((m = clause.match(/^(destroy|exile) all (artifacts|enchantments|planeswalkers|nonland permanents|permanents|lands|creatures)$/))) {
+      const verb = m[1], what = m[2];
+      steps.push({ kind: verb, targeting: 'none', resolve: (game, ctx) => game.applyMassRemovalByType(ctx, verb, what) });
+      continue;
+    }
+    // "Return all attacking creatures to their owner's hand" (Aetherize).
+    if (/^return all attacking creatures to their owner'?s'? hands?$/.test(clause)) {
+      steps.push({ kind: 'bounce', targeting: 'none', resolve: (game, ctx) => { for (const pl of game.players) for (const x of pl.battlefield.filter(y => y.attacking)) game.applyBounceEffect({ ...ctx, target: { type: 'permanent', id: x.id } }); } });
+      continue;
+    }
+    // Worldly/Mystical Tutor-style: "search your library for a creature card,
+    // reveal it, then shuffle and put the card on top".
+    if ((m = clause.match(/^search your library for an? ([a-z ]+?) card,? reveal it,? then shuffle and put (?:the|that) card on top(?: of it)?$/))) {
+      const words = m[1];
+      steps.push({ kind: 'tutor', targeting: 'none', resolve: (game, ctx) => game.applyMultiTutor(ctx, 1, words, 'top', false) });
+      continue;
+    }
+    // Buried Alive: "search your library for up to three creature cards, put
+    // them into your graveyard".
+    if ((m = clause.match(/^search your library for up to (\w+) ([a-z ]+?) cards?,? put them into your graveyard,? then shuffle$/))) {
+      const n = parseAmount(m[1]), type = m[2];
+      steps.push({ kind: 'tutor', targeting: 'none', resolve: (game, ctx) => { for (let i = 0; i < n; i++) game.applyEntomb(ctx, `search your library for a ${type} card`); } });
+      continue;
+    }
+    // Green Sun's Zenith / Finale of Devastation / Chord-style: "search your
+    // library [and/or graveyard] for a [green] creature card with mana value
+    // X or less and put it onto the battlefield".
+    if ((m = clause.match(/^search your library( and\/or graveyard)? for an? ((?:white|blue|black|red|green|legendary|artifact) )?creature card with mana value x or less,? (?:and )?put it onto the battlefield(?:,? then shuffle)?$/))) {
+      const alsoGy = !!m[1]; const qual = (m[2] || '').trim();
+      steps.push({ kind: 'tutorToBattlefield', targeting: 'none', resolve: (game, ctx) => game.applyCreatureTutorToBattlefield(ctx, ctx.xValue || 0, qual, alsoGy) });
+      continue;
+    }
+    if (/^shuffle [a-z',\s-]+ into its owner'?s library$/.test(clause)) {
+      steps.push({ kind: 'static', targeting: 'none', resolve: (game, ctx) => { game._shuffleSpellIntoLibrary = ctx.card; } });
+      continue;
+    }
+    // Command Beacon.
+    if (/^put your commander into your hand from the command zone$/.test(clause)) {
+      steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => game.applyCommanderToHand(ctx) });
+      continue;
+    }
+    // Loran: "you and target opponent each draw a card".
+    if (/^you and target (?:opponent|player) each draw a card$/.test(clause)) {
+      steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => { game.drawCard(game.getPlayer(ctx.controllerId)); game.drawCard(game.opponentOf(ctx.controllerId)); } });
+      continue;
+    }
+    // Silence: "your opponents can't cast spells this turn".
+    if (/^your opponents can'?t cast spells this turn$/.test(clause)) {
+      steps.push({ kind: 'static', targeting: 'none', resolve: (game, ctx) => { game.opponentOf(ctx.controllerId).cantCastTurn = game.turnNumber; game.log(`${game.opponentOf(ctx.controllerId).name} can't cast spells this turn.`); } });
+      continue;
+    }
+    // Kami of Whispered Hopes: "add X mana of any one color, where X is this
+    // creature's power"; Nykthos: "choose a color. Add an amount of mana of
+    // that color equal to your devotion to that color".
+    if (/^add x mana of any one colou?r$/.test(clause) || /^choose a colou?r\. add an amount of mana of that colou?r equal to your devotion to that colou?r$/.test(clause)) {
+      const devotion = /devotion/.test(clause);
+      steps.push({ kind: 'mana', targeting: 'none', resolve: (game, ctx) => game.applyBigManaOfOneColor(ctx, devotion) });
+      continue;
+    }
+    if (/^choose a colou?r$/.test(clause)) continue;
+    if (/^add an amount of mana of that colou?r equal to your devotion to that colou?r$/.test(clause)) {
+      steps.push({ kind: 'mana', targeting: 'none', resolve: (game, ctx) => game.applyBigManaOfOneColor(ctx, true) });
+      continue;
+    }
+    // Academy Ruins / Hall of Heliod's Generosity: "put target artifact card
+    // from your graveyard on top of your library".
+    if ((m = clause.match(/^put target ([a-z ]+?) card from your graveyard on top of your library$/))) {
+      const type = m[1];
+      steps.push({ kind: 'regrowth', targeting: 'none', resolve: (game, ctx) => {
+        const p = game.getPlayer(ctx.controllerId); const c = p.graveyard.filter(x => hasTypeWordFx(x, type)).sort((a, b) => (b.cmc || 0) - (a.cmc || 0))[0];
+        if (c) { p.graveyard.splice(p.graveyard.indexOf(c), 1); p.library.unshift(c); game.log(`${ctx.card.name} puts ${c.name} on top of ${p.name}'s library.`); }
+      } });
+      continue;
+    }
+    // Treasure Vault: "create X Treasure tokens".
+    if (/^create x treasure tokens$/.test(clause)) {
+      steps.push({ kind: 'token', targeting: 'none', resolve: (game, ctx) => { if (ctx.xValue) game.applyTreasureTokenEffect(ctx, ctx.xValue); } });
+      continue;
+    }
+    // "Each player sacrifices a nontoken creature of their choice."
+    if (/^each player sacrifices a nontoken creature(?: of their choice)?$/.test(clause)) {
+      steps.push({ kind: 'edict', targeting: 'none', resolve: (game, ctx) => { for (const pl of game.players) game.applyEdictEffect({ ...ctx, target: { type: 'player', id: pl.id }, nontokenOnly: true }); } });
+      continue;
+    }
+    // Rise of the Dark Realms / Living Death-style mass reanimation.
+    if (/^put all creature cards from all graveyards onto the battlefield under your control$/.test(clause)) {
+      steps.push({ kind: 'reanimate', targeting: 'none', resolve: (game, ctx) => game.applyMassReanimate(ctx, 'yours') });
+      continue;
+    }
+    if (/^each player exiles all creature cards from their graveyard, then sacrifices all creatures they control, then puts all cards they exiled this way onto the battlefield$/.test(clause)) {
+      steps.push({ kind: 'reanimate', targeting: 'none', resolve: (game, ctx) => game.applyMassReanimate(ctx, 'livingDeath') });
+      continue;
+    }
+    // "Up to one target creature phases out" (Talon Gates of Madara) /
+    // "any number of target nonland permanents you control phase out".
+    if ((m = clause.match(/^(up to one|any number of) target (creature|nonland permanent)s?(?: you control)? phases? out$/))) {
+      const many = m[1] === 'any number of';
+      steps.push({ kind: 'phase', targeting: many ? 'none' : 'creature', minTargets: 0, resolve: (game, ctx) => {
+        if (many) { for (const x of [...game.getPlayer(ctx.controllerId).battlefield].filter(y => !game.isLand(y.card))) game.phaseOut(x); return; }
+        const x = game.findPermanent(ctx.target?.id); if (x) game.phaseOut(x);
+      } });
+      continue;
+    }
+    // Overwhelming Stampede-style: "creatures you control gain trample and
+    // get +X/+X until end of turn" (X from a "where X is" wrapper).
+    if ((m = clause.match(/^(?:until end of turn, )?creatures you control gain ([a-z ]+?) and get \+x\/\+x(?: until end of turn)?$/))) {
+      const kw = m[1];
+      steps.push({ kind: 'pump', targeting: 'none', resolve: (game, ctx) => { const x = ctx.xValue || 0; game.applyMassPumpEffect(ctx, 'you', x, x, {}); for (const c of game.getPlayer(ctx.controllerId).battlefield.filter(y => game.isCreature(y.card))) c.tempKeywords.push(kw); } });
+      continue;
+    }
+    // Animate Dead's leave trigger: "that creature's controller sacrifices it".
+    if (/^that creature'?s controller sacrifices it$/.test(clause)) {
+      steps.push({ kind: 'sacrifice', targeting: 'none', resolve: (game, ctx) => { const x = game.findPermanent(ctx.sourcePerm?.attachedTo || ctx.sourcePerm?._lastAttachedTo); if (x) game.movePermanentToGraveyard(x, { sacrifice: true }); } });
+      continue;
+    }
+    // "Attach it to target [legendary] creature you control" (Mithril Coat).
+    if (/^attach (?:it|this (?:equipment|aura)) to (?:up to one )?target (?:legendary )?creature you control$/.test(clause)) {
+      steps.push({ kind: 'attach', targeting: 'yourCreature', resolve: (game, ctx) => { const self = ctx.sourcePerm && game.findPermanent(ctx.sourcePerm.id); if (self && ctx.target) { self.attachedTo = ctx.target.id; game.log(`${self.card.name} is attached to ${game.findPermanent(ctx.target.id)?.card.name}.`); } } });
+      continue;
+    }
+    // Deflecting Swat: "you may choose new targets for target spell or ability".
+    if (/^(?:you may )?choose new targets for target spell(?: or ability)?$/.test(clause)) {
+      steps.push({ kind: 'redirect', targeting: 'stackSpell', resolve: (game, ctx) => game.applyRedirectSpell(ctx) });
+      continue;
+    }
+    // The One Ring: "if you cast it, you gain protection from everything
+    // until your next turn".
+    if (/^if you cast it, you gain protection from everything until your next turn$/.test(clause)) {
+      steps.push({ kind: 'protect', targeting: 'none', resolve: (game, ctx) => { if (ctx.sourcePerm?.castInfo) { const p = game.getPlayer(ctx.controllerId); p.protectedUntilTurnOf = p.id; game.log(`${p.name} has protection from everything until their next turn.`); } } });
+      continue;
+    }
+    // Myriad Landscape: "search your library for up to two basic land cards
+    // that share a land type, put them onto the battlefield tapped".
+    if (/^search your library for up to two basic land cards that share a land type, put them onto the battlefield tapped, then shuffle$/.test(clause)) {
+      steps.push({ kind: 'tutor', targeting: 'none', resolve: (game, ctx) => {
+        const p = game.getPlayer(ctx.controllerId);
+        const byName = {}; for (const c of p.library) if (/\bBasic\b/.test(c.typeLine || '') && game.isLand(c)) (byName[c.name] ||= []).push(c);
+        const best = Object.values(byName).sort((a, b) => b.length - a.length)[0] || [];
+        game.applyMultiTutor(ctx, 0, '', 'battlefield', true);
+        for (const c of best.slice(0, 2)) { p.library.splice(p.library.indexOf(c), 1); game.putCardOntoBattlefield(c, p.id, { tapped: true }); }
+        game.log(`${ctx.card.name} finds ${best.slice(0, 2).map(c => c.name).join(' and ') || 'nothing'}.`);
+      } });
+      continue;
+    }
+    // The One Ring: "put a burden counter on this artifact, then draw a card
+    // for each burden counter on this artifact".
+    if ((m = clause.match(/^put an? ([a-z]+) counter on ([a-z ,'-]+?), then draw a card for each \1 counter on \2$/))) {
+      const type = m[1];
+      steps.push({ kind: 'draw', targeting: 'none', resolve: (game, ctx) => {
+        const self = ctx.sourcePerm && game.findPermanent(ctx.sourcePerm.id); if (!self) return;
+        self.counters[type] = (self.counters[type] || 0) + 1;
+        game.applyDrawEffect({ ...ctx, target: null }, self.counters[type]);
+      } });
+      continue;
+    }
+    // Reflecting Pool: one mana of a type its lands could make (computed by
+    // game.refreshCopiedManaTypes into producedMana).
+    if (/^add one mana of any (?:type|color) that a land (?:you control|an opponent controls) could produce$/.test(clause)) {
+      steps.push({ kind: 'mana', targeting: 'none', resolve: (game, ctx) => { const types = ctx.sourcePerm?.card.producedMana || []; if (types.length) game.applyManaEffect(ctx, types[0]); } });
+      continue;
+    }
+    // Free-cast permission lines are cast options (game.js), not effects.
+    if (/^if you control a commander, you may cast this spell without paying its mana cost$/.test(clause)) continue;
     // Class level lines ("{2}{U}: Level 2") are handled by the Class code.
     if (/^level \d+$/.test(clause)) { steps.push({ kind: 'static', targeting: 'none', resolve: () => {} }); continue; }
     // Earthbend N: target land you control becomes a 0/0 creature with haste
@@ -1785,6 +2025,14 @@ function interpretEffectText(text) {
       steps.push({ kind: 'reanimate', targeting: 'none', resolve: (game, ctx) => game.returnDiedCard(ctx, { tapped, transformed: true }) });
       continue;
     }
+    // A token whose power/toughness come from its own text: "create a green
+    // and white Elemental creature token with "This token's power and
+    // toughness are each equal to the number of creatures you control.""
+    if ((m = clause.match(/^create an? ([a-z ]+?) creature token with "this (?:token|creature)'?s power and toughness are each equal to ([^"]+?)\.?"?$/))) {
+      const typeDesc = m[1]; const countText = m[2];
+      steps.push({ kind: 'token', targeting: 'none', resolve: (game, ctx) => game.applyTokenEffect(ctx, 1, 0, 0, typeDesc, null, ([tok]) => { tok.card = { ...tok.card, power: '*', toughness: '*', oracleText: `This creature's power and toughness are each equal to ${countText}.` }; }) });
+      continue;
+    }
     // "You win the game" (Revel in Riches, after its condition).
     if (/^you win the game$/.test(clause)) {
       steps.push({ kind: 'win', targeting: 'none', resolve: (game, ctx) => game.loseGame(game.opponentOf(ctx.controllerId).id, `${ctx.card.name}`) });
@@ -1862,6 +2110,13 @@ function interpretEffectText(text) {
       } });
       continue;
     }
+    // Shatterskull Smashing: X damage (twice X if X >= 6) divided among up
+    // to two target creatures and/or planeswalkers.
+    if (/deals x damage divided as you choose among up to two target creatures and\/or planeswalkers$/.test(clause)) {
+      steps.push({ kind: 'damage', targeting: 'creature', targetCount: 2, minTargets: 0, resolve: (game, ctx) => { const x = ctx.xValue || 0; game.applyDividedDamage(ctx, x >= 6 ? 2 * x : x); } });
+      continue;
+    }
+    if (/^if x is 6 or more, [a-z ,'-]+ deals twice x damage divided as you choose among them instead$/.test(clause)) continue;
     // Divided damage: "deals 2 damage divided as you choose among one or two
     // targets" (Fire, Chandra's Pyrohelix) / "X damage ... among any number
     // of targets" (Aurelia's Fury, which also taps creatures it damages).
@@ -4166,8 +4421,11 @@ export function getSpellModes(card) {
   // Teamwork's "Choose one. If this spell was cast using teamwork, choose
   // both instead." (HULK SMASH!)
   const teamworkBoth = /^choose one\. if this spell was cast using teamwork, choose both instead\.?$/im.test(text);
+  // "Choose one. If you control a commander as you cast this spell, you may
+  // choose both instead." (Akroma's Will, Jeska's Will)
+  const commanderBoth = /^choose one\. if you control a commander as you cast this spell, you may choose both instead\.?$/im.test(text);
   const header = text.match(/^choose (one or more|one|two|up to two|any number)(?: or both)?\s*—/im)
-    || (teamworkBoth || tiered ? [null, 'one'] : null);
+    || (teamworkBoth || tiered ? [null, 'one'] : commanderBoth ? [null, 'up to two'] : null);
   if (!header && !spree) return null;
   const countWord = header ? header[1].toLowerCase() : 'one or more';
   const modes = [];
@@ -4192,7 +4450,7 @@ export function getSpellModes(card) {
   if (esc) escalate = /^(?:\{[^}]+\})+$/.test(escCost) ? escCost : /^discard a card$/i.test(escCost) ? 'discard' : null;
   // An escalate cost this engine can't pay (rare non-mana, non-discard
   // shapes) means only the first mode is ever chosen.
-  return { count: esc && !escalate ? 1 : count, upTo: upTo && !tiered, modes, spree, escalate, tiered, teamworkBoth };
+  return { count: esc && !escalate ? 1 : count, upTo: upTo && !tiered, modes, spree, escalate, tiered, teamworkBoth, commanderBoth };
 }
 
 // The extra mana a modal spell costs for the chosen modes: Spree's per-mode
@@ -5094,6 +5352,9 @@ export function getAlternativeCosts(card) {
     const m = text.match(new RegExp(`^${kind} (\\d+)\\s*[—-]\\s*((?:\\{[^}]+\\})+)`, 'im'));
     if (m) result.push({ kind, manaCost: m[2], amount: parseInt(m[1], 10) });
   }
+  // "If you control a commander, you may cast this spell without paying its
+  // mana cost" (Deflecting Swat, Fierce Guardianship).
+  if (/^if you control a commander, you may cast this spell without paying its mana cost/im.test(text)) result.push({ kind: 'commanderFree', manaCost: '{0}' });
   // "Moonfolk offering": sacrifice a [type] and pay the difference.
   const offering = text.match(/^([a-z]+) offering\b/im);
   if (offering) result.push({ kind: 'offering', manaCost: card.manaCost, offeringType: offering[1].toLowerCase() });
@@ -5432,6 +5693,8 @@ export function interpretLifeGainTriggers(card) {
   return out;
 }
 
+function hasTypeWordFx(card, word) { return new RegExp(`\\b${word.replace(/s$/, '')}s?\\b`, 'i').test(card.typeLine || ''); }
+
 // Batch 12 readers.
 // "More Than Meets the Eye {2}{R}" — cast it converted (back face) for that.
 export function getConvertCost(card) { return lineCost(card, 'more than meets the eye'); }
@@ -5737,7 +6000,11 @@ function escapeRegExp(s) {
 export function replaceSelfNameExport(card, text, replacement) { return replaceSelfName(card, text, replacement); }
 function replaceSelfName(card, text, replacement) {
   const shortName = card.name.split(',')[0].trim();
-  const namePattern = new RegExp(`\\b(?:${escapeRegExp(card.name)}|${escapeRegExp(shortName)})\\b`, 'gi');
+  // Legendary names without a comma are often shortened to the first word
+  // ("Karlov of the Ghost Council" → "Karlov", "Arcanis the Omnipotent").
+  const firstWord = /\bLegendary\b/.test(card.typeLine || '') && !card.name.includes(',') && / (?:of|the) /.test(card.name) ? card.name.split(' ')[0] : null;
+  const alts = [card.name, shortName, ...(firstWord && firstWord.length >= 4 ? [firstWord] : [])].map(escapeRegExp);
+  const namePattern = new RegExp(`\\b(?:${alts.join('|')})\\b`, 'gi');
   // Also drops ability words and flavor words that front a trigger
   // ("Grav-cannon — When this creature enters, ...", "Landfall — Whenever
   // ..."): they have no rules meaning, but every trigger pattern is anchored
